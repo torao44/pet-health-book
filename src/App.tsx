@@ -818,8 +818,8 @@ export default function App() {
               v{APP_VERSION}
             </button>
             <button onClick={() => { setGeminiKeyInput(getGeminiApiKey()); setShowApiKeySettings(true); }}
-              style={{ background: "#FFF", border: "none", borderRadius: 20, padding: "4px 12px", fontSize: 11, color: "#9A7A5C", cursor: "pointer", boxShadow: "0 1px 4px rgba(0,0,0,0.08)" }}>
-              🔑 AI設定
+              style={{ background: getGeminiApiKey() ? "#E8F5E9" : "#FFF", border: getGeminiApiKey() ? "1px solid #86C98A" : "none", borderRadius: 20, padding: "4px 12px", fontSize: 11, color: getGeminiApiKey() ? "#2E7D32" : "#9A7A5C", cursor: "pointer", boxShadow: "0 1px 4px rgba(0,0,0,0.08)", fontWeight: getGeminiApiKey() ? 700 : 400 }}>
+              {getGeminiApiKey() ? "✅ AI設定済み" : "🔑 AI設定"}
             </button>
             <button onClick={leaveGroup} style={{ background: "none", border: "none", fontSize: 11, color: "#BBA08A", cursor: "pointer", padding: 0 }}>グループを抜ける</button>
           </div>
@@ -1006,6 +1006,12 @@ export default function App() {
                 <div style={{ fontWeight: 700, fontSize: 17, color: "#3D2B1A" }}>🔑 AI機能の設定</div>
                 <button onClick={() => setShowApiKeySettings(false)} style={{ background: "none", border: "none", fontSize: 20, cursor: "pointer", color: "#9A7A5C" }}>✕</button>
               </div>
+
+              {getGeminiApiKey() && (
+                <div style={{ background: "#E8F5E9", border: "1px solid #86C98A", borderRadius: 12, padding: "10px 14px", fontSize: 13, color: "#2E7D32", fontWeight: 700, marginBottom: 14, display: "flex", alignItems: "center", gap: 6 }}>
+                  ✅ APIキー登録済みです
+                </div>
+              )}
 
               <div style={{ background: "#FFF8ED", borderRadius: 12, padding: "12px 14px", fontSize: 12, color: "#7A5C3A", lineHeight: 1.6, marginBottom: 16 }}>
                 診療明細書をAIで解析して薬の効果を解説する機能には、Googleの<b>Gemini API</b>のご自身のAPIキーが必要です。
