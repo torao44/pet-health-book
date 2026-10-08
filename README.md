@@ -1,16 +1,92 @@
-# React + Vite
+# 🐾 ペット健康手帳 (pet-health-book)
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+家族でペットの健康を記録・共有できる Web アプリです。React + TypeScript + Firebase で作られています。
 
-Currently, two official plugins are available:
+🔗 **公開URL**: https://torao44.github.io/pet-health-book/
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+---
 
-## React Compiler
+## 📋 概要
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+複数のペットの健康記録（通院・ワクチン・薬・体重・フードなど）を一元管理し、Google アカウントでログインした家族間でリアルタイムに共有できるアプリです。
 
-## Expanding the ESLint configuration
+---
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+## ✨ 主な機能
+
+### 基本機能
+- 🐱 複数ペットのプロフィール管理（写真・生年月日・マイクロチップ・保険情報など）
+- 📝 健康記録の登録・編集・削除（病院・ワクチン・薬・体重・フード・日記その他）
+- 📅 カレンダー表示
+- 🔍 記録の検索・カテゴリ絞り込み
+- 👨‍👩‍👧‍👦 Google ログイン＋グループ共有（家族で同じデータを閲覧・編集）
+
+### 体重管理
+- 📈 体重推移グラフ（期間選択可）
+- 📊 複数ペットの体重比較グラフ
+- 📋 体重データのリスト表示・印刷
+
+### 写真・思い出
+- 📷 ペットごとのフォトアルバム（最大7枚）
+- 🍖 フード記録へのパッケージ写真添付
+- 🌈 思い出ページ（旅立ったペットを偲ぶ隠し機能）
+
+### 便利機能
+- 💰 支出集計（年別・ペット別・カテゴリ別）
+- 🎂 誕生日お知らせバナー
+- 🗑️ ゴミ箱機能（誤削除からの復元）
+- 💾 手動バックアップ／リストア（JSON出力・読み込み）
+- 🔙 ブラウザ／スマホの戻るボタン対応
+- 👆 スワイプでペット切り替え
+- 📋 バージョン履歴の確認
+
+### AI機能
+- 🤖 診療明細書の写真を撮影し、Gemini API で薬・注射の効果を自動解説（要ユーザー自身の Gemini API キー、ブラウザのみに保存）
+
+---
+
+## 🛠️ 使用技術
+
+- **フロントエンド**: React 19 + TypeScript + Vite
+- **バックエンド**: Firebase Realtime Database（データ保存）、Firebase Authentication（Google ログイン）
+- **AI**: Google Gemini API（診療明細書解析、ユーザー自身の API キーを使用）
+- **ホスティング**: GitHub Pages（`gh-pages` パッケージでデプロイ）
+- **スタイル**: インライン CSS（単一ファイル構成）
+
+---
+
+## 🚀 セットアップ
+
+```bash
+# 依存パッケージのインストール
+npm install
+
+# ローカル開発サーバー起動
+npm run dev
+
+# ビルド
+npm run build
+
+# ビルド＋GitHub Pagesへデプロイ
+npm run deploy:all
+```
+
+### Firebase設定
+
+`src/firebase.ts` に Firebase プロジェクトの設定値（`firebaseConfig`）を記載する必要があります。値は [Firebase コンソール](https://console.firebase.google.com) の「プロジェクトの設定」→「マイアプリ」から確認できます。
+
+### Gemini API設定（AI機能を使う場合）
+
+アプリ内の「🔑 AI設定」から各自の Gemini API キーを登録してください。キーは[Google AI Studio](https://aistudio.google.com/apikey)で無料取得できます。キーはブラウザの `localStorage` にのみ保存され、サーバーや他の家族とは共有されません。
+
+---
+
+## 📱 使い方
+
+個人・家族利用を想定した非公開アプリです。Google アカウントでログイン後、グループ ID を共有することで家族間のデータ同期ができます。
+
+---
+
+## 📄 ライセンス
+
+個人利用プロジェクトです。
