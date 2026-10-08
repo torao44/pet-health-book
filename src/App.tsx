@@ -243,32 +243,66 @@ async function analyzeReceiptWithGemini(imageDataUrl: string): Promise<string> {
 
 もし画像が診療明細書でない、または文字が読み取れない場合は「診療明細書を読み取れませんでした。はっきり写った写真で再度お試しください。」とだけ出力してください。`;
 
-  const res = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: [{
-          parts: [
-            { text: prompt },
-            { inline_data: { mime_type: mimeType, data: base64 } },
-          ],
-        }],
-      }),
-    }
-  );
+  // ★ サーバー混雑時の自動リトライ＋モデルフォールバック
+  // Googleの公式ガイダンス通り、503/UNAVAILABLE/overloadedは一時的な混雑なので
+  // 指数バックオフで数回リトライし、それでもダメなら軽量モデルに切り替えて最後に1回試す
+  const MODELS_TO_TRY = [GEMINI_MODEL, "gemini-flash-lite-latest"];
+  const MAX_RETRIES_PER_MODEL = 2;
+  const BACKOFF_MS = [800, 2000]; // リトライ毎の待機時間
 
-  if (!res.ok) {
-    const errBody = await res.json().catch(() => null);
-    const msg = errBody?.error?.message || `HTTPエラー ${res.status}`;
-    throw new Error(msg);
+  let lastError: Error | null = null;
+
+  for (const model of MODELS_TO_TRY) {
+    for (let attempt = 0; attempt <= MAX_RETRIES_PER_MODEL; attempt++) {
+      try {
+        const res = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              contents: [{
+                parts: [
+                  { text: prompt },
+                  { inline_data: { mime_type: mimeType, data: base64 } },
+                ],
+              }],
+            }),
+          }
+        );
+
+        if (!res.ok) {
+          const errBody = await res.json().catch(() => null);
+          const msg = errBody?.error?.message || `HTTPエラー ${res.status}`;
+          const isOverloaded = res.status === 503 || /overload|high demand|unavailable/i.test(msg);
+          if (isOverloaded && attempt < MAX_RETRIES_PER_MODEL) {
+            await new Promise(r => setTimeout(r, BACKOFF_MS[attempt]));
+            continue; // 同じモデルでリトライ
+          }
+          if (isOverloaded) {
+            lastError = new Error(msg);
+            break; // このモデルは諦めて次のモデルへ
+          }
+          throw new Error(msg); // 混雑以外のエラーは即座に失敗
+        }
+
+        const data = await res.json();
+        const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (!text) throw new Error("AIからの応答が空でした");
+        return text.trim();
+      } catch (err: any) {
+        lastError = err;
+        if (!/overload|high demand|unavailable|503/i.test(err.message || "")) {
+          throw err; // 混雑以外のエラーは即座に失敗
+        }
+      }
+    }
   }
 
-  const data = await res.json();
-  const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-  if (!text) throw new Error("AIからの応答が空でした");
-  return text.trim();
+  throw new Error(
+    (lastError?.message || "不明なエラー") +
+    "\n\nGoogleのサーバーが混雑しているようです。少し時間をおいてから、もう一度お試しください。"
+  );
 }
 
 const MIGRATION_KEY = "pet-health-migrated-v1";
@@ -1518,7 +1552,7 @@ export default function App() {
                 e.target.value = "";
               }} />
             </label>
-            <div style={{ fontSize: 11, color: "#9A7A5C", marginTop: 4 }}>※ 薬・注射の名前を読み取り、効果を解説します（要Gemini APIキー）</div>
+            <div style={{ fontSize: 11, color: "#9A7A5C", marginTop: 4 }}>※ 薬・注射の名前と金額を読み取り、効果を解説します（要Gemini APIキー）<br/>※ 混雑時は自動で再試行します。10〜20秒ほどかかる場合があります</div>
           </Field>
         )}
         {editingRecord.category === "体重" && (
@@ -1637,7 +1671,7 @@ export default function App() {
                 e.target.value = "";
               }} />
             </label>
-            <div style={{ fontSize: 11, color: "#9A7A5C", marginTop: 4 }}>※ 薬・注射の名前を読み取り、効果を解説します（要Gemini APIキー）</div>
+            <div style={{ fontSize: 11, color: "#9A7A5C", marginTop: 4 }}>※ 薬・注射の名前と金額を読み取り、効果を解説します（要Gemini APIキー）<br/>※ 混雑時は自動で再試行します。10〜20秒ほどかかる場合があります</div>
           </Field>
         )}
         {editingRecord.category === "体重" && (
