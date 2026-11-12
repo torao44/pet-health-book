@@ -6,8 +6,9 @@ import { onAuthStateChanged, signInWithPopup, signOut, User } from "firebase/aut
 // ============================================================
 // バージョン情報
 // ============================================================
-const APP_VERSION = "1.9.0";
+const APP_VERSION = "1.9.1";
 const VERSION_HISTORY = [
+  { version: "1.9.1", date: "2026-11-12", notes: ["診療明細書のAI解析を高速化（使用モデルを高速な固定モデルに変更、再試行回数を削減）"] },
   { version: "1.9.0", date: "2026-10-07", notes: ["診療明細書のAI解析機能を追加（Gemini API）", "薬・注射の効果を自動解説"] },
   { version: "1.8.0", date: "2026-09-21", notes: ["フード記録にパッケージ写真を追加", "思い出ページの写真スワイプ対応", "思い出ページのプロフィール写真対応"] },
   { version: "1.7.0", date: "2026-09-15", notes: ["思い出ページ（隠し機能⭐）を追加", "ゴミ箱・バックアップ・リストア機能を追加", "ブラウザ/スマホの戻るボタン対応"] },
@@ -200,7 +201,7 @@ function getExifDate(arrayBuffer: ArrayBuffer): string | null {
 // ★ Gemini API 連携（診療明細書のAI解析）
 // ============================================================
 const GEMINI_KEY_STORAGE = "pet-health-gemini-api-key";
-const GEMINI_MODEL = "gemini-flash-latest"; // 常に最新のFlashモデルを指すエイリアス
+const GEMINI_MODEL = "gemini-2.5-flash-lite"; // 高速な固定モデル（latestエイリアスは中身が入れ替わり遅くなりやすいため固定）
 
 function getGeminiApiKey(): string {
   return localStorage.getItem(GEMINI_KEY_STORAGE) || "";
@@ -244,10 +245,10 @@ async function analyzeReceiptWithGemini(imageDataUrl: string): Promise<string> {
 もし画像が診療明細書でない、または文字が読み取れない場合は「診療明細書を読み取れませんでした。はっきり写った写真で再度お試しください。」とだけ出力してください。`;
 
   // ★ サーバー混雑時の自動リトライ＋モデルフォールバック
-  // Googleの公式ガイダンス通り、503/UNAVAILABLE/overloadedは一時的な混雑なので
-  // 指数バックオフで数回リトライし、それでもダメなら軽量モデルに切り替えて最後に1回試す
-  const MODELS_TO_TRY = [GEMINI_MODEL, "gemini-flash-lite-latest"];
-  const MAX_RETRIES_PER_MODEL = 2;
+  // 503/UNAVAILABLE/overloadedは一時的な混雑なので短いバックオフで1回だけリトライし、
+  // それでもダメなら通常モデルに切り替えて試す（待ち時間が積み重ならないよう回数は絞る）
+  const MODELS_TO_TRY = [GEMINI_MODEL, "gemini-2.5-flash"];
+  const MAX_RETRIES_PER_MODEL = 1;
   const BACKOFF_MS = [800, 2000]; // リトライ毎の待機時間
 
   let lastError: Error | null = null;
@@ -267,6 +268,11 @@ async function analyzeReceiptWithGemini(imageDataUrl: string): Promise<string> {
                   { inline_data: { mime_type: mimeType, data: base64 } },
                 ],
               }],
+              // 読み取り作業に思考は不要なのでオフにし、出力量にも上限を付けて高速化
+              generationConfig: {
+                thinkingConfig: { thinkingBudget: 0 },
+                maxOutputTokens: 4096,
+              },
             }),
           }
         );
@@ -1552,7 +1558,7 @@ export default function App() {
                 e.target.value = "";
               }} />
             </label>
-            <div style={{ fontSize: 11, color: "#9A7A5C", marginTop: 4 }}>※ 薬・注射の名前と金額を読み取り、効果を解説します（要Gemini APIキー）<br/>※ 混雑時は自動で再試行します。10〜20秒ほどかかる場合があります</div>
+            <div style={{ fontSize: 11, color: "#9A7A5C", marginTop: 4 }}>※ 薬・注射の名前と金額を読み取り、効果を解説します（要Gemini APIキー）<br/>※ 混雑時は自動で再試行します。数秒〜20秒ほどかかる場合があります</div>
           </Field>
         )}
         {editingRecord.category === "体重" && (
@@ -1671,7 +1677,7 @@ export default function App() {
                 e.target.value = "";
               }} />
             </label>
-            <div style={{ fontSize: 11, color: "#9A7A5C", marginTop: 4 }}>※ 薬・注射の名前と金額を読み取り、効果を解説します（要Gemini APIキー）<br/>※ 混雑時は自動で再試行します。10〜20秒ほどかかる場合があります</div>
+            <div style={{ fontSize: 11, color: "#9A7A5C", marginTop: 4 }}>※ 薬・注射の名前と金額を読み取り、効果を解説します（要Gemini APIキー）<br/>※ 混雑時は自動で再試行します。数秒〜20秒ほどかかる場合があります</div>
           </Field>
         )}
         {editingRecord.category === "体重" && (
