@@ -6,8 +6,9 @@ import { onAuthStateChanged, signInWithPopup, signOut, User } from "firebase/aut
 // ============================================================
 // バージョン情報
 // ============================================================
-const APP_VERSION = "1.9.1";
+const APP_VERSION = "1.9.2";
 const VERSION_HISTORY = [
+  { version: "1.9.2", date: "2026-11-15", notes: ["診療明細書のAI解析モデルを現行モデルに更新（旧モデルが新規利用できなくなったため）", "モデルが使えないエラーでも予備モデルへ自動で切り替えるよう修正"] },
   { version: "1.9.1", date: "2026-11-12", notes: ["診療明細書のAI解析を高速化（使用モデルを高速な固定モデルに変更、再試行回数を削減）"] },
   { version: "1.9.0", date: "2026-10-07", notes: ["診療明細書のAI解析機能を追加（Gemini API）", "薬・注射の効果を自動解説"] },
   { version: "1.8.0", date: "2026-09-21", notes: ["フード記録にパッケージ写真を追加", "思い出ページの写真スワイプ対応", "思い出ページのプロフィール写真対応"] },
@@ -201,7 +202,7 @@ function getExifDate(arrayBuffer: ArrayBuffer): string | null {
 // ★ Gemini API 連携（診療明細書のAI解析）
 // ============================================================
 const GEMINI_KEY_STORAGE = "pet-health-gemini-api-key";
-const GEMINI_MODEL = "gemini-2.5-flash-lite"; // 高速な固定モデル（latestエイリアスは中身が入れ替わり遅くなりやすいため固定）
+const GEMINI_MODEL = "gemini-3.5-flash-lite"; // 高速な固定モデル（latestエイリアスは中身が入れ替わり遅くなりやすいため固定）
 
 function getGeminiApiKey(): string {
   return localStorage.getItem(GEMINI_KEY_STORAGE) || "";
@@ -247,7 +248,7 @@ async function analyzeReceiptWithGemini(imageDataUrl: string): Promise<string> {
   // ★ サーバー混雑時の自動リトライ＋モデルフォールバック
   // 503/UNAVAILABLE/overloadedは一時的な混雑なので短いバックオフで1回だけリトライし、
   // それでもダメなら通常モデルに切り替えて試す（待ち時間が積み重ならないよう回数は絞る）
-  const MODELS_TO_TRY = [GEMINI_MODEL, "gemini-2.5-flash"];
+  const MODELS_TO_TRY = [GEMINI_MODEL, "gemini-3.8-flash"];
   const MAX_RETRIES_PER_MODEL = 1;
   const BACKOFF_MS = [800, 2000]; // リトライ毎の待機時間
 
@@ -268,9 +269,8 @@ async function analyzeReceiptWithGemini(imageDataUrl: string): Promise<string> {
                   { inline_data: { mime_type: mimeType, data: base64 } },
                 ],
               }],
-              // 読み取り作業に思考は不要なのでオフにし、出力量にも上限を付けて高速化
+              // 出力量に上限を付けて高速化（現行モデルは思考設定の方式が変わったため、互換性優先で思考設定は送らない）
               generationConfig: {
-                thinkingConfig: { thinkingBudget: 0 },
                 maxOutputTokens: 4096,
               },
             }),
@@ -280,16 +280,18 @@ async function analyzeReceiptWithGemini(imageDataUrl: string): Promise<string> {
         if (!res.ok) {
           const errBody = await res.json().catch(() => null);
           const msg = errBody?.error?.message || `HTTPエラー ${res.status}`;
-          const isOverloaded = res.status === 503 || /overload|high demand|unavailable/i.test(msg);
+          const isOverloaded = res.status === 503 || /overload|high demand/i.test(msg);
+          // モデル自体が使えない（提供終了・新規利用不可など）場合はリトライしても無駄なので次のモデルへ
+          const isModelUnavailable = res.status === 404 || /not found|no longer available|is not available|not supported/i.test(msg);
           if (isOverloaded && attempt < MAX_RETRIES_PER_MODEL) {
             await new Promise(r => setTimeout(r, BACKOFF_MS[attempt]));
             continue; // 同じモデルでリトライ
           }
-          if (isOverloaded) {
+          if (isOverloaded || isModelUnavailable) {
             lastError = new Error(msg);
             break; // このモデルは諦めて次のモデルへ
           }
-          throw new Error(msg); // 混雑以外のエラーは即座に失敗
+          throw new Error(msg); // それ以外のエラーは即座に失敗
         }
 
         const data = await res.json();
@@ -298,6 +300,9 @@ async function analyzeReceiptWithGemini(imageDataUrl: string): Promise<string> {
         return text.trim();
       } catch (err: any) {
         lastError = err;
+        if (/not found|no longer available|is not available|not supported/i.test(err.message || "")) {
+          break; // モデルが使えないエラーは次のモデルへ
+        }
         if (!/overload|high demand|unavailable|503/i.test(err.message || "")) {
           throw err; // 混雑以外のエラーは即座に失敗
         }
@@ -305,10 +310,11 @@ async function analyzeReceiptWithGemini(imageDataUrl: string): Promise<string> {
     }
   }
 
-  throw new Error(
-    (lastError?.message || "不明なエラー") +
-    "\n\nGoogleのサーバーが混雑しているようです。少し時間をおいてから、もう一度お試しください。"
-  );
+  const lastMsg = lastError?.message || "不明なエラー";
+  const suffix = /overload|high demand|unavailable|503/i.test(lastMsg)
+    ? "\n\nGoogleのサーバーが混雑しているようです。少し時間をおいてから、もう一度お試しください。"
+    : "";
+  throw new Error(lastMsg + suffix);
 }
 
 const MIGRATION_KEY = "pet-health-migrated-v1";
