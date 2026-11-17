@@ -6,8 +6,9 @@ import { onAuthStateChanged, signInWithPopup, signOut, User } from "firebase/aut
 // ============================================================
 // バージョン情報
 // ============================================================
-const APP_VERSION = "1.9.6";
+const APP_VERSION = "1.9.7";
 const VERSION_HISTORY = [
+  { version: "1.9.7", date: "2026-11-17", notes: ["AI解析から薬を登録するとき、『薬』カテゴリの記録にも効能つきで自動登録するようにした"] },
   { version: "1.9.6", date: "2026-11-17", notes: ["診療明細書のAI解析から処方薬を下書き登録できるようにした", "お薬管理（期間・回数・1日おき・飲ませたチェック）を追加"] },
   { version: "1.9.5", date: "2026-11-17", notes: ["診療明細書のAI解析で、ネブライザー治療などの治療・処置にも解説を付けるよう改善"] },
   { version: "1.9.4", date: "2026-11-15", notes: ["ファビコン・アプリアイコンを肉球デザインに変更"] },
@@ -83,6 +84,7 @@ interface ParsedMedicine {
   perDay: number;
   timing: string;
   days: number | null;
+  effect?: string; // ★ v1.9.7: 効能（「薬」カテゴリ記録の自動作成用）
 }
 interface MedicineDraft extends ParsedMedicine {
   pattern: "daily" | "alternate";
@@ -289,12 +291,13 @@ Markdown記法（#やアスタリスク**など）は使わないでください
 
 さらに、明細書が読み取れた場合は、本文の出力の最後に、機械読み取り用のデータを次の形式で必ず付けてください（このブロック自体への説明や前置きは不要です）。
 ===MED_JSON===
-{"medicines":[{"name":"薬の名前","dose":"用量","perDay":1,"timing":"タイミング","days":14}]}
+{"medicines":[{"name":"薬の名前","dose":"用量","perDay":1,"timing":"タイミング","days":14,"effect":"効能"}]}
 ===END===
 このデータに入れるのは「家で飲ませる処方薬（持ち帰りの飲み薬）」だけです。病院で実施した注射・治療（ソレンシアなどの注射、ネブライザー治療、点滴、皮下補液など）と、再診料・診察料・処方料・検査料などの費用項目は絶対に入れないでください。
 - name・dose・timing は明細書の記載通りに書く。dose（例：1/7錠）と timing（例：夕食前、朝・夕）に記載がなければ空文字にする
 - perDay は用法から判定する（1日1回→1、1日2回→2）。分からなければ null にする
 - days は「〜日分」の数字。記載がなければ null にする
+- effect は、その薬が何のための薬か・効能を1〜2文で書く。本文の「→」解説と同じ内容にし、対象動物（猫用なら猫用、犬用なら犬用）を取り違えないこと。効能について根拠のあることが書けなければ空文字にする
 - 家で飲ませる処方薬が1つもなければ {"medicines":[]} を出力する`;
 
   // ★ サーバー混雑時の自動リトライ＋モデルフォールバック
@@ -457,6 +460,7 @@ function parseAiReceiptText(raw: string): { text: string; drafts: ParsedMedicine
         perDay: typeof x.perDay === "number" && x.perDay > 0 ? x.perDay : 1,
         timing: typeof x.timing === "string" ? x.timing : "",
         days: typeof x.days === "number" && x.days > 0 ? x.days : null,
+        effect: typeof x.effect === "string" ? x.effect.trim() : "",
       }));
     return { text, drafts };
   } catch {
@@ -1058,7 +1062,11 @@ export default function App() {
     if (valid.length === 0) { setAiDrafts(null); return; }
     updateState(s => {
       let nextId = s.nextMedicineId || 1;
-      const newMeds: Medicine[] = valid.map(d => {
+      let nextRecId = s.nextRecordId || 1;
+      const newMeds: Medicine[] = [];
+      const newRecords: HealthRecord[] = [];
+      for (const d of valid) {
+        const startDate = d.startDate || toDateStr(new Date());
         const med: Medicine = {
           id: nextId++,
           petId,
@@ -1067,14 +1075,35 @@ export default function App() {
           perDay: d.perDay || 1,
           timing: d.timing || "",
           pattern: d.pattern,
-          startDate: d.startDate || toDateStr(new Date()),
+          startDate,
           note: "",
           checks: {},
         };
         if (d.days && d.days > 0) med.days = d.days;
-        return med;
-      });
-      return { ...s, medicines: [...(s.medicines || []), ...newMeds], nextMedicineId: nextId };
+        newMeds.push(med);
+        // ★ v1.9.7: お薬管理への登録と同時に、「薬」カテゴリの記録にも効能つきで残す
+        const lines: string[] = [];
+        if (d.effect && d.effect.trim()) lines.push(`効能：${d.effect.trim()}`);
+        if (med.dose) lines.push(`用量：${med.dose}`);
+        lines.push(`1日${med.perDay}回` + (med.timing ? ` · ${med.timing}` : ""));
+        if (med.days) {
+          const end = medicineEndDate(med);
+          if (end) lines.push(`期間：${startDate} 〜 ${end}（${med.days}日分）`);
+        }
+        newRecords.push({
+          id: nextRecId++,
+          petId,
+          date: startDate,
+          category: "薬",
+          title: med.name,
+          description: lines.join("\n"),
+          weight: "",
+          nextDate: "",
+          cost: "",
+          foodPhoto: "",
+        });
+      }
+      return { ...s, medicines: [...(s.medicines || []), ...newMeds], nextMedicineId: nextId, records: [...s.records, ...newRecords], nextRecordId: nextRecId };
     });
     setAiDrafts(null);
     setAiResult(null);
@@ -3736,6 +3765,7 @@ function AiResultModal({
                     </div>
                   </div>
                 ))}
+                <div style={{ fontSize: 12, color: "#5C3A1E", marginBottom: 8 }}>登録すると『薬』カテゴリの記録にも効能つきで残ります。</div>
                 <button onClick={onRegisterDrafts}
                   style={{ width: "100%", background: "#3B82F6", color: "#FFF", border: "none", borderRadius: 12, padding: "12px", fontSize: 14, fontWeight: 700, cursor: "pointer", marginBottom: 6 }}>
                   💊 すべて登録する
