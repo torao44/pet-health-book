@@ -6,8 +6,9 @@ import { onAuthStateChanged, signInWithPopup, signOut, User } from "firebase/aut
 // ============================================================
 // バージョン情報
 // ============================================================
-const APP_VERSION = "1.9.5";
+const APP_VERSION = "1.9.6";
 const VERSION_HISTORY = [
+  { version: "1.9.6", date: "2026-11-17", notes: ["診療明細書のAI解析から処方薬を下書き登録できるようにした", "お薬管理（期間・回数・1日おき・飲ませたチェック）を追加"] },
   { version: "1.9.5", date: "2026-11-17", notes: ["診療明細書のAI解析で、ネブライザー治療などの治療・処置にも解説を付けるよう改善"] },
   { version: "1.9.4", date: "2026-11-15", notes: ["ファビコン・アプリアイコンを肉球デザインに変更"] },
   { version: "1.9.3", date: "2026-11-15", notes: ["診療明細書のAI解析の出力形式を刷新（診断名・明細・金額欄を明細書の記載通りに整理）", "薬の解説で対象動物を取り違えないよう改善"] },
@@ -60,6 +61,34 @@ interface HealthRecord {
   foodPhoto?: string; // ★ フードのパッケージ写真（base64）
 }
 
+// ★ 追加: お薬管理
+interface Medicine {
+  id: number;
+  petId: number;
+  name: string;
+  dose?: string;      // 用量（自由記入、例: 1/7錠）
+  perDay?: number;    // 1日の回数
+  timing?: string;    // タイミング（自由記入、例: 夕食前）
+  pattern: "daily" | "alternate"; // 毎日 / 1日おき
+  startDate: string;  // 開始日 YYYY-MM-DD
+  days?: number;      // 日数（未設定なら終了なし）
+  note?: string;
+  checks: Record<string, boolean>; // 飲ませたチェック（キー: YYYY-MM-DD）
+}
+
+// ★ AI解析から抽出した処方薬の下書き
+interface ParsedMedicine {
+  name: string;
+  dose: string;
+  perDay: number;
+  timing: string;
+  days: number | null;
+}
+interface MedicineDraft extends ParsedMedicine {
+  pattern: "daily" | "alternate";
+  startDate: string;
+}
+
 // ★ 追加: フォトアルバム用
 interface PetPhoto {
   id: number;
@@ -88,10 +117,12 @@ interface AppState {
   photos: PetPhoto[];
   trash: HealthRecord[];
   memorials: Memorial[];
+  medicines: Medicine[];
   nextPetId: number;
   nextRecordId: number;
   nextPhotoId: number;
   nextMemorialId: number;
+  nextMedicineId: number;
 }
 
 type View = "home" | "petDetail" | "addPet" | "editPet" | "addRecord" | "editRecord" | "recordList" | "album" | "trash" | "memorial" | "memorialDetail" | "addMemorial" | "editMemorial";
@@ -125,10 +156,12 @@ const DEFAULT_STATE: AppState = {
   photos: [],
   trash: [],
   memorials: [],
+  medicines: [],
   nextPetId: 1,
   nextRecordId: 1,
   nextPhotoId: 1,
   nextMemorialId: 1,
+  nextMedicineId: 1,
 };
 
 
@@ -252,7 +285,17 @@ async function analyzeReceiptWithGemini(imageDataUrl: string): Promise<string> {
 【未収金残額】¥金額
 
 Markdown記法（#やアスタリスク**など）は使わないでください。前置きや断り書きは一切不要、本文のみ出力してください。
-もし画像が診療明細書でない、または文字が読み取れない場合は「診療明細書を読み取れませんでした。はっきり写った写真で再度お試しください。」とだけ出力してください。`;
+もし画像が診療明細書でない、または文字が読み取れない場合は「診療明細書を読み取れませんでした。はっきり写った写真で再度お試しください。」とだけ出力してください。
+
+さらに、明細書が読み取れた場合は、本文の出力の最後に、機械読み取り用のデータを次の形式で必ず付けてください（このブロック自体への説明や前置きは不要です）。
+===MED_JSON===
+{"medicines":[{"name":"薬の名前","dose":"用量","perDay":1,"timing":"タイミング","days":14}]}
+===END===
+このデータに入れるのは「家で飲ませる処方薬（持ち帰りの飲み薬）」だけです。病院で実施した注射・治療（ソレンシアなどの注射、ネブライザー治療、点滴、皮下補液など）と、再診料・診察料・処方料・検査料などの費用項目は絶対に入れないでください。
+- name・dose・timing は明細書の記載通りに書く。dose（例：1/7錠）と timing（例：夕食前、朝・夕）に記載がなければ空文字にする
+- perDay は用法から判定する（1日1回→1、1日2回→2）。分からなければ null にする
+- days は「〜日分」の数字。記載がなければ null にする
+- 家で飲ませる処方薬が1つもなければ {"medicines":[]} を出力する`;
 
   // ★ サーバー混雑時の自動リトライ＋モデルフォールバック
   // 503/UNAVAILABLE/overloadedは一時的な混雑なので短いバックオフで1回だけリトライし、
@@ -351,6 +394,77 @@ function calcAge(birthdate: string): string {
 }
 
 // ============================================================
+// ★ お薬の日付ヘルパー（日付はすべて YYYY-MM-DD のローカル日付で扱う）
+// ============================================================
+function toDateStr(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+function addDays(dateStr: string, n: number): string {
+  const d = new Date(dateStr + "T00:00:00");
+  d.setDate(d.getDate() + n);
+  return toDateStr(d);
+}
+function diffDays(from: string, to: string): number {
+  const a = new Date(from + "T00:00:00").getTime();
+  const b = new Date(to + "T00:00:00").getTime();
+  return Math.round((b - a) / 86400000);
+}
+// 終了日（日数が未設定なら null＝終了なし）
+function medicineEndDate(med: Medicine): string | null {
+  if (!med.days || med.days <= 0) return null;
+  return addDays(med.startDate, med.days - 1);
+}
+// 指定日が投薬日かどうか
+function isDoseDay(med: Medicine, dateStr: string): boolean {
+  if (dateStr < med.startDate) return false;
+  const end = medicineEndDate(med);
+  if (end && dateStr > end) return false;
+  if (med.pattern === "alternate") return diffDays(med.startDate, dateStr) % 2 === 0;
+  return true;
+}
+// 投薬期間が終了しているかどうか
+function isMedicineFinished(med: Medicine, dateStr: string): boolean {
+  const end = medicineEndDate(med);
+  return !!end && dateStr > end;
+}
+// 残り日数（今日を含む。日数が未設定なら null）
+function medicineRemainingDays(med: Medicine, dateStr: string): number | null {
+  const end = medicineEndDate(med);
+  if (!end) return null;
+  return diffDays(dateStr, end) + 1;
+}
+
+// ============================================================
+// ★ AI解析結果から処方薬の下書きを取り出す
+// 本文末尾の ===MED_JSON=== 〜 ===END=== ブロックを抽出し、本文からは取り除く。
+// 取り出しに失敗した場合は下書きなし（従来通りの表示のみ）になる。
+// ============================================================
+function parseAiReceiptText(raw: string): { text: string; drafts: ParsedMedicine[] } {
+  const match = raw.match(/===MED_JSON===([\s\S]*?)===END===/);
+  if (!match || match.index === undefined) return { text: raw, drafts: [] };
+  const text = (raw.slice(0, match.index) + raw.slice(match.index + match[0].length)).trim();
+  try {
+    const parsed = JSON.parse(match[1].trim());
+    const list = Array.isArray(parsed?.medicines) ? parsed.medicines : [];
+    const drafts: ParsedMedicine[] = list
+      .filter((x: any) => x && typeof x.name === "string" && x.name.trim())
+      .map((x: any) => ({
+        name: String(x.name).trim(),
+        dose: typeof x.dose === "string" ? x.dose : "",
+        perDay: typeof x.perDay === "number" && x.perDay > 0 ? x.perDay : 1,
+        timing: typeof x.timing === "string" ? x.timing : "",
+        days: typeof x.days === "number" && x.days > 0 ? x.days : null,
+      }));
+    return { text, drafts };
+  } catch {
+    return { text, drafts: [] };
+  }
+}
+
+// ============================================================
 // Main App
 // ============================================================
 export default function App() {
@@ -384,6 +498,9 @@ export default function App() {
   const [aiAnalyzing, setAiAnalyzing] = useState(false); // ★ AI解析中
   const [aiResult, setAiResult] = useState<string | null>(null); // ★ AI解析結果（確認モーダル用）
   const [aiError, setAiError] = useState<string | null>(null);
+  const [aiDrafts, setAiDrafts] = useState<MedicineDraft[] | null>(null); // ★ AI解析から抽出した処方薬の下書き
+  const [editingMedicine, setEditingMedicine] = useState<Partial<Medicine>>({}); // ★ お薬フォーム
+  const [showMedicineForm, setShowMedicineForm] = useState(false); // ★ お薬フォーム表示
   const [selectedMemorialId, setSelectedMemorialId] = useState<number | null>(null);
   const [editingMemorial, setEditingMemorial] = useState<Partial<Memorial>>({});
   const [memorialAlbumPhoto, setMemorialAlbumPhoto] = useState<{ data: string; date: string } | null>(null);
@@ -478,8 +595,13 @@ export default function App() {
           memorials: val.memorials
             ? (Array.isArray(val.memorials) ? val.memorials : Object.values(val.memorials))
             : [],
+          medicines: val.medicines
+            ? (Array.isArray(val.medicines) ? val.medicines : Object.values(val.medicines))
+                .map((m: any) => ({ ...m, checks: m.checks || {} }))
+            : [],
           nextPhotoId: val.nextPhotoId || 1,
           nextMemorialId: val.nextMemorialId || 1,
+          nextMedicineId: val.nextMedicineId || 1,
         };
         setState(normalized);
       } else {
@@ -536,10 +658,12 @@ export default function App() {
       photos: newState.photos,
       trash: newState.trash,
       memorials: newState.memorials || [],
+      medicines: newState.medicines || [],
       nextPetId: newState.nextPetId,
       nextRecordId: newState.nextRecordId,
       nextPhotoId: newState.nextPhotoId,
       nextMemorialId: newState.nextMemorialId || 1,
+      nextMedicineId: newState.nextMedicineId || 1,
     })
       .then(() => setSyncing(false))
       .catch((err) => {
@@ -746,6 +870,7 @@ export default function App() {
       ...s,
       pets: s.pets.filter(p => p.id !== id),
       records: s.records.filter(r => r.petId !== id),
+      medicines: (s.medicines || []).filter(m => m.petId !== id),
     }));
     navigateTo("home");
     showToast("削除しました");
@@ -821,7 +946,12 @@ export default function App() {
         const data = JSON.parse(e.target?.result as string) as AppState;
         if (!data.pets || !data.records) throw new Error("invalid");
         if (!confirm("現在のデータをバックアップで上書きしますか？")) return;
-        updateState(() => ({ ...DEFAULT_STATE, ...data, trash: data.trash || [] }));
+        updateState(() => ({
+          ...DEFAULT_STATE, ...data,
+          trash: data.trash || [],
+          medicines: (data.medicines || []).map((m: any) => ({ ...m, checks: m.checks || {} })),
+          nextMedicineId: data.nextMedicineId || 1,
+        }));
         showToast("リストア完了 ✅");
       } catch {
         showToast("ファイルが正しくありません ❌");
@@ -841,6 +971,115 @@ export default function App() {
     }));
     showToast("記録を更新しました ✅");
     navigateTo("recordList");
+  }
+
+  // ---------- Medicine CRUD ----------
+  function saveMedicine() {
+    if (!selectedPetId) return;
+    const name = (editingMedicine.name || "").trim();
+    if (!name) { showToast("薬の名前を入力してください"); return; }
+    const days = editingMedicine.days && editingMedicine.days > 0 ? editingMedicine.days : undefined;
+    if (editingMedicine.id) {
+      updateState(s => ({
+        ...s,
+        medicines: (s.medicines || []).map(m => {
+          if (m.id !== editingMedicine.id) return m;
+          const updated: Medicine = {
+            ...m,
+            name,
+            dose: editingMedicine.dose || "",
+            perDay: editingMedicine.perDay || 1,
+            timing: editingMedicine.timing || "",
+            pattern: editingMedicine.pattern || "daily",
+            startDate: editingMedicine.startDate || toDateStr(new Date()),
+            note: editingMedicine.note || "",
+          };
+          if (days) updated.days = days; else delete updated.days;
+          return updated;
+        }),
+      }));
+      showToast("お薬を更新しました ✅");
+    } else {
+      const med: Medicine = {
+        id: state!.nextMedicineId || 1,
+        petId: selectedPetId,
+        name,
+        dose: editingMedicine.dose || "",
+        perDay: editingMedicine.perDay || 1,
+        timing: editingMedicine.timing || "",
+        pattern: editingMedicine.pattern || "daily",
+        startDate: editingMedicine.startDate || toDateStr(new Date()),
+        note: editingMedicine.note || "",
+        checks: {},
+      };
+      if (days) med.days = days;
+      updateState(s => ({ ...s, medicines: [...(s.medicines || []), med], nextMedicineId: (s.nextMedicineId || 1) + 1 }));
+      showToast("お薬を追加しました 💊");
+    }
+    setShowMedicineForm(false);
+  }
+
+  function deleteMedicine(id: number) {
+    if (!confirm("このお薬を削除しますか？")) return;
+    updateState(s => ({ ...s, medicines: (s.medicines || []).filter(m => m.id !== id) }));
+    showToast("お薬を削除しました");
+  }
+
+  function toggleMedicineCheck(med: Medicine) {
+    const t = toDateStr(new Date());
+    updateState(s => ({
+      ...s,
+      medicines: (s.medicines || []).map(m => {
+        if (m.id !== med.id) return m;
+        const checks = { ...(m.checks || {}) };
+        if (checks[t]) delete checks[t]; else checks[t] = true;
+        return { ...m, checks };
+      }),
+    }));
+  }
+
+  // ---------- AI処方薬ドラフト ----------
+  function updateAiDraft(idx: number, patch: Partial<MedicineDraft>) {
+    setAiDrafts(prev => prev ? prev.map((d, i) => i === idx ? { ...d, ...patch } : d) : prev);
+  }
+
+  function removeAiDraft(idx: number) {
+    setAiDrafts(prev => {
+      if (!prev) return prev;
+      const next = prev.filter((_, i) => i !== idx);
+      return next.length > 0 ? next : null;
+    });
+  }
+
+  function registerAiDrafts() {
+    if (!aiDrafts || !selectedPetId) return;
+    const petId = selectedPetId;
+    const valid = aiDrafts.filter(d => d.name.trim());
+    if (valid.length === 0) { setAiDrafts(null); return; }
+    updateState(s => {
+      let nextId = s.nextMedicineId || 1;
+      const newMeds: Medicine[] = valid.map(d => {
+        const med: Medicine = {
+          id: nextId++,
+          petId,
+          name: d.name.trim(),
+          dose: d.dose || "",
+          perDay: d.perDay || 1,
+          timing: d.timing || "",
+          pattern: d.pattern,
+          startDate: d.startDate || toDateStr(new Date()),
+          note: "",
+          checks: {},
+        };
+        if (d.days && d.days > 0) med.days = d.days;
+        return med;
+      });
+      return { ...s, medicines: [...(s.medicines || []), ...newMeds], nextMedicineId: nextId };
+    });
+    setAiDrafts(null);
+    setAiResult(null);
+    setAiError(null);
+    showToast("お薬を登録しました 💊");
   }
 
   // ============================================================
@@ -1173,6 +1412,16 @@ export default function App() {
     const petIndex = state.pets.findIndex(p => p.id === selectedPet.id);
     const prevPet = state.pets[petIndex - 1] ?? null;
     const nextPet = state.pets[petIndex + 1] ?? null;
+    const medToday = toDateStr(new Date());
+    const petMedicines = (state.medicines || [])
+      .filter(m => m.petId === selectedPet.id)
+      .slice()
+      .sort((a, b) => {
+        const fa = isMedicineFinished(a, medToday) ? 1 : 0;
+        const fb = isMedicineFinished(b, medToday) ? 1 : 0;
+        if (fa !== fb) return fa - fb; // 終了した薬は後ろへ
+        return a.startDate.localeCompare(b.startDate);
+      });
 
     const handleTouchStart = (e: React.TouchEvent) => {
       (window as any)._swipeStartX = e.touches[0].clientX;
@@ -1242,6 +1491,60 @@ export default function App() {
         {selectedPet.notes && (
           <div style={{ ...styles.notesBox, whiteSpace: "pre-wrap" }}>
             <span style={{ marginRight: 6 }}>📌</span><AutoLink text={selectedPet.notes} />
+          </div>
+        )}
+
+        {/* ★ お薬セクション */}
+        <div style={styles.sectionHeader}>
+          <span>💊 お薬</span>
+          <button style={styles.linkBtn} onClick={() => { setEditingMedicine({ pattern: "daily", perDay: 1, startDate: medToday }); setShowMedicineForm(true); }}>＋ 薬を追加</button>
+        </div>
+        {petMedicines.length === 0 ? (
+          <div style={{ background: "#FFF", borderRadius: 12, padding: "14px 16px", color: "#BBA08A", fontSize: 13, marginBottom: 20 }}>
+            登録されているお薬はありません
+          </div>
+        ) : (
+          <div style={{ marginBottom: 20 }}>
+            {petMedicines.map(med => {
+              const end = medicineEndDate(med);
+              const finished = isMedicineFinished(med, medToday);
+              const doseToday = isDoseDay(med, medToday);
+              const remaining = medicineRemainingDays(med, medToday);
+              const checkedToday = !!((med.checks || {})[medToday]);
+              return (
+                <div key={med.id} style={{ ...styles.recordCard, cursor: "default", opacity: finished ? 0.55 : 1 }}>
+                  <div style={{ padding: "14px 16px" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
+                      <div>
+                        <div style={{ fontWeight: 700, color: "#3D2B1A" }}>💊 {med.name}{med.dose ? ` ${med.dose}` : ""}</div>
+                        <div style={{ fontSize: 12, color: "#9A7A5C", marginTop: 2 }}>
+                          {med.perDay ? `1日${med.perDay}回` : ""}{med.timing ? ` · ${med.timing}` : ""} · {med.pattern === "alternate" ? "1日おき" : "毎日"}
+                        </div>
+                        <div style={{ fontSize: 12, color: "#9A7A5C", marginTop: 2 }}>
+                          📅 {med.startDate} 〜 {end ?? "終了日なし"}
+                          {finished ? "（終了）" : remaining !== null ? `（あと${remaining}日）` : ""}
+                        </div>
+                        {med.note && <div style={{ fontSize: 12, color: "#7A5C3A", marginTop: 4, whiteSpace: "pre-wrap" }}>{med.note}</div>}
+                      </div>
+                      <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+                        <button style={{ ...styles.deleteBtn, opacity: 0.7 }} onClick={() => { setEditingMedicine({ ...med }); setShowMedicineForm(true); }}>✏️</button>
+                        <button style={styles.deleteBtn} onClick={() => deleteMedicine(med.id)}>🗑️</button>
+                      </div>
+                    </div>
+                    {doseToday ? (
+                      <button onClick={() => toggleMedicineCheck(med)}
+                        style={{ marginTop: 10, width: "100%", padding: "10px", borderRadius: 10, border: checkedToday ? "2px solid #10B981" : "2px solid #E8D5BC", background: checkedToday ? "#D1FAE5" : "#FFF7EE", color: "#3D2B1A", fontWeight: 700, fontSize: 14, cursor: "pointer" }}>
+                        {checkedToday ? "✅ 今日の分は飲ませた" : "⬜ 今日の分を飲ませたらタップ"}
+                      </button>
+                    ) : !finished ? (
+                      <div style={{ fontSize: 12, color: "#BBA08A", marginTop: 8 }}>
+                        {medToday < med.startDate ? `${med.startDate} から開始します` : "今日は投薬日ではありません"}
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
+              );
+            })}
           </div>
         )}
 
@@ -1339,6 +1642,68 @@ export default function App() {
             <button style={styles.fabBtn} onClick={() => { setEditingRecord({ date: new Date().toISOString().slice(0, 10) }); navigateTo("addRecord"); }}>＋ 記録を追加</button>
           </div>
         </div>
+
+        {/* ★ お薬フォームモーダル */}
+        {showMedicineForm && (
+          <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 400, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}
+            onClick={() => setShowMedicineForm(false)}>
+            <div style={{ background: "#FFF", borderRadius: 20, padding: 24, width: "100%", maxWidth: 480, maxHeight: "85vh", overflowY: "auto" }}
+              onClick={e => e.stopPropagation()}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+                <div style={{ fontWeight: 700, fontSize: 16, color: "#3D2B1A" }}>{editingMedicine.id ? "💊 お薬を編集" : "💊 お薬を追加"}</div>
+                <button onClick={() => setShowMedicineForm(false)} style={{ background: "none", border: "none", fontSize: 20, cursor: "pointer", color: "#9A7A5C" }}>✕</button>
+              </div>
+              <Field label="薬の名前 *">
+                <input style={styles.input} value={editingMedicine.name || ""} onChange={e => setEditingMedicine(m => ({ ...m, name: e.target.value }))} placeholder="例: ガバペン錠200mg" />
+              </Field>
+              <Field label="用量">
+                <input style={styles.input} value={editingMedicine.dose || ""} onChange={e => setEditingMedicine(m => ({ ...m, dose: e.target.value }))} placeholder="例: 1/7錠" />
+              </Field>
+              <div style={{ display: "flex", gap: 12 }}>
+                <div style={{ flex: 1 }}>
+                  <Field label="1日の回数">
+                    <input type="number" min={1} style={styles.input} value={editingMedicine.perDay ?? 1} onChange={e => setEditingMedicine(m => ({ ...m, perDay: Number(e.target.value) || 1 }))} />
+                  </Field>
+                </div>
+                <div style={{ flex: 1 }}>
+                  <Field label="タイミング">
+                    <input style={styles.input} value={editingMedicine.timing || ""} onChange={e => setEditingMedicine(m => ({ ...m, timing: e.target.value }))} placeholder="例: 夕食前" />
+                  </Field>
+                </div>
+              </div>
+              <Field label="パターン">
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button onClick={() => setEditingMedicine(m => ({ ...m, pattern: "daily" }))}
+                    style={{ flex: 1, padding: "10px", borderRadius: 10, border: (editingMedicine.pattern || "daily") === "daily" ? "2px solid #3B82F6" : "2px solid #E8D5BC", background: (editingMedicine.pattern || "daily") === "daily" ? "#DBEAFE" : "#FFF7EE", cursor: "pointer", fontWeight: 600, color: "#3D2B1A" }}>
+                    毎日
+                  </button>
+                  <button onClick={() => setEditingMedicine(m => ({ ...m, pattern: "alternate" }))}
+                    style={{ flex: 1, padding: "10px", borderRadius: 10, border: editingMedicine.pattern === "alternate" ? "2px solid #3B82F6" : "2px solid #E8D5BC", background: editingMedicine.pattern === "alternate" ? "#DBEAFE" : "#FFF7EE", cursor: "pointer", fontWeight: 600, color: "#3D2B1A" }}>
+                    1日おき
+                  </button>
+                </div>
+              </Field>
+              <div style={{ display: "flex", gap: 12 }}>
+                <div style={{ flex: 1 }}>
+                  <Field label="開始日">
+                    <input type="date" style={styles.input} value={editingMedicine.startDate || ""} onChange={e => setEditingMedicine(m => ({ ...m, startDate: e.target.value }))} />
+                  </Field>
+                </div>
+                <div style={{ flex: 1 }}>
+                  <Field label="日数（空欄＝終了なし）">
+                    <input type="number" min={1} style={styles.input} value={editingMedicine.days ?? ""} onChange={e => setEditingMedicine(m => ({ ...m, days: e.target.value === "" ? undefined : Number(e.target.value) }))} placeholder="例: 14" />
+                  </Field>
+                </div>
+              </div>
+              <Field label="メモ">
+                <textarea style={{ ...styles.input, height: 70, resize: "vertical" }} value={editingMedicine.note || ""} onChange={e => setEditingMedicine(m => ({ ...m, note: e.target.value }))} placeholder="気づいたことなど" />
+              </Field>
+              <button style={{ ...styles.primaryBtn, width: "100%" }} onClick={saveMedicine}>
+                {editingMedicine.id ? "✅ 更新する" : "💊 追加する"}
+              </button>
+            </div>
+          </div>
+        )}
 
         {showCalendarModal && (
           <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 200, display: "flex", alignItems: "flex-end", justifyContent: "center" }}
@@ -1559,8 +1924,12 @@ export default function App() {
                     const dataUrl = canvas.toDataURL("image/jpeg", 0.85);
                     setAiAnalyzing(true); setAiError(null);
                     try {
-                      const result = await analyzeReceiptWithGemini(dataUrl);
-                      setAiResult(result);
+                      const rawResult = await analyzeReceiptWithGemini(dataUrl);
+                      const { text, drafts } = parseAiReceiptText(rawResult);
+                      setAiResult(text);
+                      setAiDrafts(drafts.length > 0
+                        ? drafts.map(d => ({ ...d, pattern: "daily" as const, startDate: editingRecord.date || toDateStr(new Date()) }))
+                        : null);
                     } catch (err: any) {
                       setAiError(err.message || "解析に失敗しました");
                     } finally {
@@ -1623,8 +1992,13 @@ export default function App() {
       </div>
       <AiResultModal
         aiResult={aiResult} aiError={aiError}
-        onClose={() => { setAiResult(null); setAiError(null); }}
+        onClose={() => { setAiResult(null); setAiError(null); setAiDrafts(null); }}
         onAppend={text => setEditingRecord(r => ({ ...r, description: (r.description ? r.description + "\n\n" : "") + text }))}
+        drafts={aiDrafts}
+        onUpdateDraft={updateAiDraft}
+        onRemoveDraft={removeAiDraft}
+        onRegisterDrafts={registerAiDrafts}
+        onDismissDrafts={() => setAiDrafts(null)}
       />
       <Toast message={toast} />
     </Layout>
@@ -1678,8 +2052,12 @@ export default function App() {
                     const dataUrl = canvas.toDataURL("image/jpeg", 0.85);
                     setAiAnalyzing(true); setAiError(null);
                     try {
-                      const result = await analyzeReceiptWithGemini(dataUrl);
-                      setAiResult(result);
+                      const rawResult = await analyzeReceiptWithGemini(dataUrl);
+                      const { text, drafts } = parseAiReceiptText(rawResult);
+                      setAiResult(text);
+                      setAiDrafts(drafts.length > 0
+                        ? drafts.map(d => ({ ...d, pattern: "daily" as const, startDate: editingRecord.date || toDateStr(new Date()) }))
+                        : null);
                     } catch (err: any) {
                       setAiError(err.message || "解析に失敗しました");
                     } finally {
@@ -1742,8 +2120,13 @@ export default function App() {
       </div>
       <AiResultModal
         aiResult={aiResult} aiError={aiError}
-        onClose={() => { setAiResult(null); setAiError(null); }}
+        onClose={() => { setAiResult(null); setAiError(null); setAiDrafts(null); }}
         onAppend={text => setEditingRecord(r => ({ ...r, description: (r.description ? r.description + "\n\n" : "") + text }))}
+        drafts={aiDrafts}
+        onUpdateDraft={updateAiDraft}
+        onRemoveDraft={removeAiDraft}
+        onRegisterDrafts={registerAiDrafts}
+        onDismissDrafts={() => setAiDrafts(null)}
       />
       <Toast message={toast} />
     </Layout>
@@ -3267,13 +3650,21 @@ function IconBtn({ onClick, title, danger, children }: { onClick: () => void; ti
 // ★ AI解析結果・エラーの確認モーダル
 function AiResultModal({
   aiResult, aiError, onClose, onAppend,
+  drafts, onUpdateDraft, onRemoveDraft, onRegisterDrafts, onDismissDrafts,
 }: {
   aiResult: string | null;
   aiError: string | null;
   onClose: () => void;
   onAppend: (text: string) => void;
+  drafts: MedicineDraft[] | null;
+  onUpdateDraft: (idx: number, patch: Partial<MedicineDraft>) => void;
+  onRemoveDraft: (idx: number) => void;
+  onRegisterDrafts: () => void;
+  onDismissDrafts: () => void;
 }) {
   if (!aiResult && !aiError) return null;
+  const draftInput: React.CSSProperties = { width: "100%", padding: "8px 10px", borderRadius: 8, border: "1.5px solid #E8D5BC", background: "#FFFBF7", fontSize: 14, color: "#3D2B1A", boxSizing: "border-box" };
+  const draftLabel: React.CSSProperties = { display: "block", fontSize: 11, fontWeight: 600, color: "#7A5C3A", marginBottom: 4 };
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 400, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}
       onClick={onClose}>
@@ -3295,6 +3686,66 @@ function AiResultModal({
             <div style={{ background: "#F7F3EC", borderRadius: 12, padding: "14px 16px", fontSize: 13, color: "#3D2B1A", lineHeight: 1.7, whiteSpace: "pre-wrap", marginBottom: 16 }}>
               {aiResult}
             </div>
+            {drafts && drafts.length > 0 && (
+              <div style={{ background: "#EFF6FF", border: "1px solid #BFDBFE", borderRadius: 12, padding: "14px 16px", marginBottom: 16 }}>
+                <div style={{ fontWeight: 700, fontSize: 14, color: "#1E40AF", marginBottom: 4 }}>💊 この薬を登録しますか？</div>
+                <div style={{ fontSize: 12, color: "#5C3A1E", marginBottom: 12 }}>明細書から読み取った処方薬です。内容を確認・修正してから登録してください。</div>
+                {drafts.map((d, i) => (
+                  <div key={i} style={{ background: "#FFF", borderRadius: 10, padding: 12, marginBottom: 10 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                      <span style={{ fontSize: 12, fontWeight: 700, color: "#3D2B1A" }}>処方薬 {i + 1}</span>
+                      <button onClick={() => onRemoveDraft(i)} style={{ background: "none", border: "none", color: "#B91C1C", fontSize: 12, cursor: "pointer", fontWeight: 600 }}>✕ 除外</button>
+                    </div>
+                    <div style={{ marginBottom: 8 }}>
+                      <label style={draftLabel}>薬の名前</label>
+                      <input style={draftInput} value={d.name} onChange={e => onUpdateDraft(i, { name: e.target.value })} />
+                    </div>
+                    <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+                      <div style={{ flex: 1 }}>
+                        <label style={draftLabel}>用量</label>
+                        <input style={draftInput} value={d.dose} onChange={e => onUpdateDraft(i, { dose: e.target.value })} placeholder="例: 1/7錠" />
+                      </div>
+                      <div style={{ width: 92 }}>
+                        <label style={draftLabel}>1日の回数</label>
+                        <input type="number" min={1} style={draftInput} value={d.perDay} onChange={e => onUpdateDraft(i, { perDay: Number(e.target.value) || 1 })} />
+                      </div>
+                    </div>
+                    <div style={{ marginBottom: 8 }}>
+                      <label style={draftLabel}>タイミング</label>
+                      <input style={draftInput} value={d.timing} onChange={e => onUpdateDraft(i, { timing: e.target.value })} placeholder="例: 夕食前" />
+                    </div>
+                    <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+                      <button onClick={() => onUpdateDraft(i, { pattern: "daily" })}
+                        style={{ flex: 1, padding: "8px", borderRadius: 8, border: d.pattern === "daily" ? "2px solid #3B82F6" : "2px solid #E8D5BC", background: d.pattern === "daily" ? "#DBEAFE" : "#FFF7EE", cursor: "pointer", fontWeight: 600, fontSize: 13, color: "#3D2B1A" }}>
+                        毎日
+                      </button>
+                      <button onClick={() => onUpdateDraft(i, { pattern: "alternate" })}
+                        style={{ flex: 1, padding: "8px", borderRadius: 8, border: d.pattern === "alternate" ? "2px solid #3B82F6" : "2px solid #E8D5BC", background: d.pattern === "alternate" ? "#DBEAFE" : "#FFF7EE", cursor: "pointer", fontWeight: 600, fontSize: 13, color: "#3D2B1A" }}>
+                        1日おき
+                      </button>
+                    </div>
+                    <div style={{ display: "flex", gap: 8 }}>
+                      <div style={{ flex: 1 }}>
+                        <label style={draftLabel}>開始日</label>
+                        <input type="date" style={draftInput} value={d.startDate} onChange={e => onUpdateDraft(i, { startDate: e.target.value })} />
+                      </div>
+                      <div style={{ width: 92 }}>
+                        <label style={draftLabel}>日数</label>
+                        <input type="number" min={1} style={draftInput} value={d.days ?? ""} onChange={e => onUpdateDraft(i, { days: e.target.value === "" ? null : Number(e.target.value) })} placeholder="日分" />
+                      </div>
+                    </div>
+                  </div>
+                ))}
+                <button onClick={onRegisterDrafts}
+                  style={{ width: "100%", background: "#3B82F6", color: "#FFF", border: "none", borderRadius: 12, padding: "12px", fontSize: 14, fontWeight: 700, cursor: "pointer", marginBottom: 6 }}>
+                  💊 すべて登録する
+                </button>
+                <button onClick={onDismissDrafts}
+                  style={{ width: "100%", background: "none", color: "#7A5C3A", border: "none", padding: "6px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>
+                  登録しない
+                </button>
+              </div>
+            )}
             <button onClick={() => { onAppend(aiResult!); onClose(); }}
               style={{ width: "100%", background: "#C49A6C", color: "#FFF", border: "none", borderRadius: 12, padding: "13px", fontSize: 14, fontWeight: 700, cursor: "pointer" }}>
               ＋ 詳細メモに追記する
