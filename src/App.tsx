@@ -6,8 +6,9 @@ import { onAuthStateChanged, signInWithPopup, signOut, User } from "firebase/aut
 // ============================================================
 // バージョン情報
 // ============================================================
-const APP_VERSION = "1.9.7";
+const APP_VERSION = "1.9.8";
 const VERSION_HISTORY = [
+  { version: "1.9.8", date: "2026-11-18", notes: ["AI解析からの薬の二重登録を防止（同じ名前・開始日の薬がある場合はスキップして知らせる）"] },
   { version: "1.9.7", date: "2026-11-17", notes: ["AI解析から薬を登録するとき、『薬』カテゴリの記録にも効能つきで自動登録するようにした"] },
   { version: "1.9.6", date: "2026-11-17", notes: ["診療明細書のAI解析から処方薬を下書き登録できるようにした", "お薬管理（期間・回数・1日おき・飲ませたチェック）を追加"] },
   { version: "1.9.5", date: "2026-11-17", notes: ["診療明細書のAI解析で、ネブライザー治療などの治療・処置にも解説を付けるよう改善"] },
@@ -1060,12 +1061,26 @@ export default function App() {
     const petId = selectedPetId;
     const valid = aiDrafts.filter(d => d.name.trim());
     if (valid.length === 0) { setAiDrafts(null); return; }
-    updateState(s => {
+    // ★ v1.9.8: 二重登録防止 — 同じペットに「同じ名前・同じ開始日」の薬が既にある下書きはスキップする
+    const todayStr = toDateStr(new Date());
+    const seenKeys = new Set<string>();
+    for (const m of (state.medicines || [])) {
+      if (m.petId === petId) seenKeys.add(`${m.name.trim()}|${m.startDate}`);
+    }
+    const toRegister: MedicineDraft[] = [];
+    let skippedCount = 0;
+    for (const d of valid) {
+      const key = `${d.name.trim()}|${d.startDate || todayStr}`;
+      if (seenKeys.has(key)) { skippedCount++; continue; }
+      seenKeys.add(key);
+      toRegister.push(d);
+    }
+    if (toRegister.length > 0) updateState(s => {
       let nextId = s.nextMedicineId || 1;
       let nextRecId = s.nextRecordId || 1;
       const newMeds: Medicine[] = [];
       const newRecords: HealthRecord[] = [];
-      for (const d of valid) {
+      for (const d of toRegister) {
         const startDate = d.startDate || toDateStr(new Date());
         const med: Medicine = {
           id: nextId++,
@@ -1108,7 +1123,9 @@ export default function App() {
     setAiDrafts(null);
     setAiResult(null);
     setAiError(null);
-    showToast("お薬を登録しました 💊");
+    if (skippedCount === 0) showToast("お薬を登録しました 💊");
+    else if (toRegister.length === 0) showToast("すべて登録済みでした 💊");
+    else showToast(`登録しました（${toRegister.length}件）。${skippedCount}件は登録済みのためスキップしました`);
   }
 
   // ============================================================
