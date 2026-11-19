@@ -6,8 +6,9 @@ import { onAuthStateChanged, signInWithPopup, signOut, User } from "firebase/aut
 // ============================================================
 // バージョン情報
 // ============================================================
-const APP_VERSION = "1.9.8";
+const APP_VERSION = "1.9.9";
 const VERSION_HISTORY = [
+  { version: "1.9.9", date: "2026-11-19", notes: ["フードのパッケージ写真をAI解析して、商品名やメーカー・内容量などをタイトルとメモに自動入力できるようにした"] },
   { version: "1.9.8", date: "2026-11-18", notes: ["AI解析からの薬の二重登録を防止（同じ名前・開始日の薬がある場合はスキップして知らせる）"] },
   { version: "1.9.7", date: "2026-11-17", notes: ["AI解析から薬を登録するとき、『薬』カテゴリの記録にも効能つきで自動登録するようにした"] },
   { version: "1.9.6", date: "2026-11-17", notes: ["診療明細書のAI解析から処方薬を下書き登録できるようにした", "お薬管理（期間・回数・1日おき・飲ませたチェック）を追加"] },
@@ -90,6 +91,16 @@ interface ParsedMedicine {
 interface MedicineDraft extends ParsedMedicine {
   pattern: "daily" | "alternate";
   startDate: string;
+}
+
+// ★ v1.9.9: AI解析から抽出したフード情報
+interface ParsedFood {
+  name: string;
+  maker: string;
+  amount: string;
+  target: string;
+  flavor: string;
+  note: string;
 }
 
 // ★ 追加: フォトアルバム用
@@ -373,6 +384,126 @@ Markdown記法（#やアスタリスク**など）は使わないでください
   throw new Error(lastMsg + suffix);
 }
 
+// ============================================================
+// ★ v1.9.9: フードのパッケージ写真のAI解析
+// 明細書版と同じ流儀（同じAPIキー・モデルフォールバック・リトライ）で、
+// パッケージから商品名などを読み取り ===FOOD_JSON=== ブロックのみで返させる
+// ============================================================
+async function analyzeFoodWithGemini(imageDataUrl: string): Promise<string> {
+  const apiKey = getGeminiApiKey();
+  if (!apiKey) throw new Error("NO_KEY");
+
+  const base64 = imageDataUrl.split(",")[1];
+  const mimeMatch = imageDataUrl.match(/^data:(image\/\w+);/);
+  const mimeType = mimeMatch ? mimeMatch[1] : "image/jpeg";
+
+  const prompt = `これはペットフードのパッケージの写真です。パッケージに書かれている内容を読み取り、機械読み取り用のデータを次の形式でのみ出力してください。前置き・説明文・Markdown記法は一切不要です。
+===FOOD_JSON===
+{"name":"商品名","maker":"メーカー・ブランド名","amount":"内容量","target":"対象","flavor":"味・種類","note":"短い特徴"}
+===END===
+- name はパッケージに書かれた商品名をそのまま書く
+- maker はメーカー名・ブランド名（例：ロイヤルカナン、ピュリナ ワン）
+- amount は内容量（例：1.5kg、400g、24缶）。書かれていなければ空文字にする
+- target は対象（例：成猫用、子猫用、シニア用、全ステージ）。書かれていなければ空文字にする
+- flavor は味や種類（例：チキン味、まぐろ味、室内猫用）。書かれていなければ空文字にする
+- note は主な特徴を1文で短く（例：毛玉ケアに配慮、尿路の健康維持）。書かれていなければ空文字にする
+- 書かれていないことを推測で補わない
+もし画像がペットフードのパッケージでない、または文字が読み取れない場合は、すべてのフィールドを空文字にして出力してください。`;
+
+  // ★ 明細書版と同じ：サーバー混雑時の自動リトライ＋モデルフォールバック
+  const MODELS_TO_TRY = [GEMINI_MODEL, "gemini-3.8-flash"];
+  const MAX_RETRIES_PER_MODEL = 1;
+  const BACKOFF_MS = [800, 2000];
+
+  let lastError: Error | null = null;
+
+  for (const model of MODELS_TO_TRY) {
+    for (let attempt = 0; attempt <= MAX_RETRIES_PER_MODEL; attempt++) {
+      try {
+        const res = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              contents: [{
+                parts: [
+                  { text: prompt },
+                  { inline_data: { mime_type: mimeType, data: base64 } },
+                ],
+              }],
+              generationConfig: {
+                maxOutputTokens: 1024,
+              },
+            }),
+          }
+        );
+
+        if (!res.ok) {
+          const errBody = await res.json().catch(() => null);
+          const msg = errBody?.error?.message || `HTTPエラー ${res.status}`;
+          const isOverloaded = res.status === 503 || /overload|high demand/i.test(msg);
+          const isModelUnavailable = res.status === 404 || /not found|no longer available|is not available|not supported/i.test(msg);
+          if (isOverloaded && attempt < MAX_RETRIES_PER_MODEL) {
+            await new Promise(r => setTimeout(r, BACKOFF_MS[attempt]));
+            continue;
+          }
+          if (isOverloaded || isModelUnavailable) {
+            lastError = new Error(msg);
+            break;
+          }
+          throw new Error(msg);
+        }
+
+        const data = await res.json();
+        const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (!text) throw new Error("AIからの応答が空でした");
+        return text.trim();
+      } catch (err: any) {
+        lastError = err;
+        if (/not found|no longer available|is not available|not supported/i.test(err.message || "")) {
+          break;
+        }
+        if (!/overload|high demand|unavailable|503/i.test(err.message || "")) {
+          throw err;
+        }
+      }
+    }
+  }
+
+  const lastMsg = lastError?.message || "不明なエラー";
+  const suffix = /overload|high demand|unavailable|503/i.test(lastMsg)
+    ? "\n\nGoogleのサーバーが混雑しているようです。少し時間をおいてから、もう一度お試しください。"
+    : "";
+  throw new Error(lastMsg + suffix);
+}
+
+// ============================================================
+// ★ v1.9.9: AI解析結果からフード情報を取り出す
+// ===FOOD_JSON=== 〜 ===END=== ブロックを抽出する。
+// 取り出しに失敗した場合や全フィールド空の場合は null（読み取り不能扱い）。
+// ============================================================
+function parseAiFoodText(raw: string): ParsedFood | null {
+  const match = raw.match(/===FOOD_JSON===([\s\S]*?)===END===/);
+  if (!match) return null;
+  try {
+    const parsed = JSON.parse(match[1].trim());
+    const asStr = (v: any) => (typeof v === "string" ? v.trim() : "");
+    const food: ParsedFood = {
+      name: asStr(parsed?.name),
+      maker: asStr(parsed?.maker),
+      amount: asStr(parsed?.amount),
+      target: asStr(parsed?.target),
+      flavor: asStr(parsed?.flavor),
+      note: asStr(parsed?.note),
+    };
+    if (!food.name && !food.maker && !food.amount && !food.target && !food.flavor && !food.note) return null;
+    return food;
+  } catch {
+    return null;
+  }
+}
+
 const MIGRATION_KEY = "pet-health-migrated-v1";
 function migrateRecords(records: HealthRecord[]): HealthRecord[] {
   const alreadyMigrated = localStorage.getItem(MIGRATION_KEY);
@@ -501,6 +632,7 @@ export default function App() {
   const [showApiKeySettings, setShowApiKeySettings] = useState(false); // ★ Gemini APIキー設定
   const [geminiKeyInput, setGeminiKeyInput] = useState(getGeminiApiKey());
   const [aiAnalyzing, setAiAnalyzing] = useState(false); // ★ AI解析中
+  const [foodAnalyzing, setFoodAnalyzing] = useState(false); // ★ v1.9.9: フードAI解析中
   const [aiResult, setAiResult] = useState<string | null>(null); // ★ AI解析結果（確認モーダル用）
   const [aiError, setAiError] = useState<string | null>(null);
   const [aiDrafts, setAiDrafts] = useState<MedicineDraft[] | null>(null); // ★ AI解析から抽出した処方薬の下書き
@@ -976,6 +1108,47 @@ export default function App() {
     }));
     showToast("記録を更新しました ✅");
     navigateTo("recordList");
+  }
+
+  // ★ v1.9.9: フードのパッケージ写真をAI解析してタイトル・メモへ反映
+  async function handleAnalyzeFood() {
+    const photo = editingRecord.foodPhoto;
+    if (!photo || foodAnalyzing) return;
+    if (!getGeminiApiKey()) { setShowApiKeySettings(true); return; }
+    setFoodAnalyzing(true);
+    try {
+      const raw = await analyzeFoodWithGemini(photo);
+      const food = parseAiFoodText(raw);
+      if (!food) {
+        showToast("読み取れませんでした。はっきり写った写真でお試しください");
+        return;
+      }
+      const lines: string[] = [];
+      const hasTitle = !!(editingRecord.title && editingRecord.title.trim());
+      let newTitle: string | null = null;
+      if (food.name) {
+        if (!hasTitle) newTitle = food.name;
+        else lines.push(`商品名：${food.name}`);
+      }
+      if (food.maker) lines.push(`メーカー：${food.maker}`);
+      if (food.amount) lines.push(`内容量：${food.amount}`);
+      if (food.target) lines.push(`対象：${food.target}`);
+      if (food.flavor) lines.push(`種類：${food.flavor}`);
+      if (food.note) lines.push(`特徴：${food.note}`);
+      setEditingRecord(r => ({
+        ...r,
+        ...(newTitle !== null ? { title: newTitle } : {}),
+        description: lines.length > 0
+          ? (r.description ? r.description + "\n\n" : "") + lines.join("\n")
+          : r.description,
+      }));
+      showToast("AIで読み取りました 🔍");
+    } catch (err: any) {
+      if (err?.message === "NO_KEY") { setShowApiKeySettings(true); return; }
+      showToast("読み取れませんでした。はっきり写った写真でお試しください");
+    } finally {
+      setFoodAnalyzing(false);
+    }
   }
 
   // ---------- Medicine CRUD ----------
@@ -2026,6 +2199,15 @@ export default function App() {
                 }} />
               </label>
             </div>
+            {editingRecord.foodPhoto && (
+              <>
+                <button disabled={foodAnalyzing} onClick={handleAnalyzeFood}
+                  style={{ marginTop: 10, width: "100%", background: "#F0F8FF", border: "1px dashed #93C5FD", borderRadius: 10, padding: "12px", textAlign: "center", cursor: foodAnalyzing ? "default" : "pointer", color: "#1E40AF", fontSize: 13, fontWeight: 600, opacity: foodAnalyzing ? 0.6 : 1 }}>
+                  {foodAnalyzing ? "🔄 AIが解析中..." : "🔍 AIで商品名を読み取る"}
+                </button>
+                <div style={{ fontSize: 11, color: "#9A7A5C", marginTop: 4 }}>※ 商品名・メーカー・内容量などを読み取り、タイトルとメモに自動入力します（要Gemini APIキー）</div>
+              </>
+            )}
           </Field>
         )}
         <Field label="次回予定日">
@@ -2154,6 +2336,15 @@ export default function App() {
                 }} />
               </label>
             </div>
+            {editingRecord.foodPhoto && (
+              <>
+                <button disabled={foodAnalyzing} onClick={handleAnalyzeFood}
+                  style={{ marginTop: 10, width: "100%", background: "#F0F8FF", border: "1px dashed #93C5FD", borderRadius: 10, padding: "12px", textAlign: "center", cursor: foodAnalyzing ? "default" : "pointer", color: "#1E40AF", fontSize: 13, fontWeight: 600, opacity: foodAnalyzing ? 0.6 : 1 }}>
+                  {foodAnalyzing ? "🔄 AIが解析中..." : "🔍 AIで商品名を読み取る"}
+                </button>
+                <div style={{ fontSize: 11, color: "#9A7A5C", marginTop: 4 }}>※ 商品名・メーカー・内容量などを読み取り、タイトルとメモに自動入力します（要Gemini APIキー）</div>
+              </>
+            )}
           </Field>
         )}
         <Field label="次回予定日">
