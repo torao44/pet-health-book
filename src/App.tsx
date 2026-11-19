@@ -6,8 +6,9 @@ import { onAuthStateChanged, signInWithPopup, signOut, User } from "firebase/aut
 // ============================================================
 // バージョン情報
 // ============================================================
-const APP_VERSION = "1.9.10";
+const APP_VERSION = "1.9.11";
 const VERSION_HISTORY = [
+  { version: "1.9.11", date: "2026-11-19", notes: ["フードの記録にカロリー（kcal）を入力できる欄を追加", "フードのAI解析でカロリーも読み取れるようにし、確認パネルからも入力できるようにした"] },
   { version: "1.9.10", date: "2026-11-19", notes: ["フードのAI解析で、読み取った内容を確認・修正してから入力できるようにした", "フードのAI解析を高解像度の写真で行うようにして、内容量などの小さい文字も読み取りやすくした"] },
   { version: "1.9.9", date: "2026-11-19", notes: ["フードのパッケージ写真をAI解析して、商品名やメーカー・内容量などをタイトルとメモに自動入力できるようにした"] },
   { version: "1.9.8", date: "2026-11-18", notes: ["AI解析からの薬の二重登録を防止（同じ名前・開始日の薬がある場合はスキップして知らせる）"] },
@@ -63,6 +64,7 @@ interface HealthRecord {
   nextDate?: string;
   cost?: string;
   foodPhoto?: string; // ★ フードのパッケージ写真（base64）
+  calories?: string; // ★ v1.9.11: フードのカロリー（kcal、1袋・1本あたり）
 }
 
 // ★ 追加: お薬管理
@@ -102,6 +104,7 @@ interface ParsedFood {
   target: string;
   flavor: string;
   note: string;
+  calories: string; // ★ v1.9.11: カロリー（kcal、数値のみ）
 }
 
 // ★ 追加: フォトアルバム用
@@ -400,7 +403,7 @@ async function analyzeFoodWithGemini(imageDataUrl: string): Promise<string> {
 
   const prompt = `これはペットフードのパッケージの写真です。パッケージに書かれている内容を読み取り、機械読み取り用のデータを次の形式でのみ出力してください。前置き・説明文・Markdown記法は一切不要です。
 ===FOOD_JSON===
-{"name":"商品名","maker":"メーカー・ブランド名","amount":"内容量","target":"対象","flavor":"味・種類","note":"短い特徴"}
+{"name":"商品名","maker":"メーカー・ブランド名","amount":"内容量","target":"対象","flavor":"味・種類","note":"短い特徴","calories":"カロリー"}
 ===END===
 - name はパッケージに書かれた商品名をそのまま書く
 - maker はメーカー名・ブランド名（例：ロイヤルカナン、ピュリナ ワン）
@@ -408,6 +411,7 @@ async function analyzeFoodWithGemini(imageDataUrl: string): Promise<string> {
 - target は対象（例：成猫用、子猫用、シニア用、全ステージ）。「総合栄養食」「一般食」「療法食」「おやつ」などの分類が書かれていればそれも含めること。対象動物（猫用・犬用）がパッケージから明らかな場合も含めること（例：猫用・成猫用）。それでも分からなければ空文字にすること
 - flavor は味や種類（例：チキン味、まぐろ味、室内猫用）。書かれていなければ空文字にする
 - note は主な特徴を1文で短く（例：毛玉ケアに配慮、尿路の健康維持）。書かれていなければ空文字にする
+- calories はカロリー（kcal、1袋・1本あたり）。成分表示・栄養成分表示などに kcal の記載があれば数値のみで書く（例：30）。読み取れない場合は推測で埋めず空文字にすること
 - 書かれていないことを推測で補わない
 もし画像がペットフードのパッケージでない、または文字が読み取れない場合は、すべてのフィールドを空文字にして出力してください。`;
 
@@ -497,8 +501,9 @@ function parseAiFoodText(raw: string): ParsedFood | null {
       target: asStr(parsed?.target),
       flavor: asStr(parsed?.flavor),
       note: asStr(parsed?.note),
+      calories: asStr(parsed?.calories),
     };
-    if (!food.name && !food.maker && !food.amount && !food.target && !food.flavor && !food.note) return null;
+    if (!food.name && !food.maker && !food.amount && !food.target && !food.flavor && !food.note && !food.calories) return null;
     return food;
   } catch {
     return null;
@@ -1032,6 +1037,7 @@ export default function App() {
       nextDate: editingRecord.nextDate || "",
       cost: editingRecord.cost || "",
       foodPhoto: editingRecord.foodPhoto || "",
+      calories: editingRecord.calories || "",
     };
     updateState(s => ({ ...s, records: [...s.records, rec], nextRecordId: s.nextRecordId + 1 }));
     showToast("記録を追加しました 📝");
@@ -1149,6 +1155,7 @@ export default function App() {
       target: foodDraft.target.trim(),
       flavor: foodDraft.flavor.trim(),
       note: foodDraft.note.trim(),
+      calories: foodDraft.calories.trim(),
     };
     const lines: string[] = [];
     const hasTitle = !!(editingRecord.title && editingRecord.title.trim());
@@ -1162,10 +1169,12 @@ export default function App() {
     if (food.target) lines.push(`対象：${food.target}`);
     if (food.flavor) lines.push(`種類：${food.flavor}`);
     if (food.note) lines.push(`特徴：${food.note}`);
-    if (newTitle !== null || lines.length > 0) {
+    // ★ v1.9.11: カロリーはメモではなく専用欄へ（パネルで空なら既存値を変更しない）
+    if (newTitle !== null || lines.length > 0 || food.calories) {
       setEditingRecord(r => ({
         ...r,
         ...(newTitle !== null ? { title: newTitle } : {}),
+        ...(food.calories ? { calories: food.calories } : {}),
         description: lines.length > 0
           ? (r.description ? r.description + "\n\n" : "") + lines.join("\n")
           : r.description,
@@ -2194,6 +2203,7 @@ export default function App() {
           </Field>
         )}
         {editingRecord.category === "フード" && (
+          <>
           <Field label="📷 パッケージ写真">
             <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
               {editingRecord.foodPhoto && (
@@ -2239,6 +2249,11 @@ export default function App() {
               </>
             )}
           </Field>
+          <Field label="🔥 カロリー（kcal）">
+            <input type="number" style={styles.input} value={editingRecord.calories || ""} onChange={e => setEditingRecord(r => ({ ...r, calories: e.target.value }))} placeholder="例: 30" min="0" />
+            <div style={{ fontSize: 11, color: "#9A7A5C", marginTop: 4 }}>※ 1袋・1本あたりのカロリーです。パッケージ裏面の成分表示などを見て入力してください</div>
+          </Field>
+          </>
         )}
         <Field label="次回予定日">
           <input type="date" style={styles.input} value={editingRecord.nextDate || ""} onChange={e => setEditingRecord(r => ({ ...r, nextDate: e.target.value }))} />
@@ -2343,6 +2358,7 @@ export default function App() {
           </Field>
         )}
         {editingRecord.category === "フード" && (
+          <>
           <Field label="📷 パッケージ写真">
             <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
               {editingRecord.foodPhoto && (
@@ -2388,6 +2404,11 @@ export default function App() {
               </>
             )}
           </Field>
+          <Field label="🔥 カロリー（kcal）">
+            <input type="number" style={styles.input} value={editingRecord.calories || ""} onChange={e => setEditingRecord(r => ({ ...r, calories: e.target.value }))} placeholder="例: 30" min="0" />
+            <div style={{ fontSize: 11, color: "#9A7A5C", marginTop: 4 }}>※ 1袋・1本あたりのカロリーです。パッケージ裏面の成分表示などを見て入力してください</div>
+          </Field>
+          </>
         )}
         <Field label="次回予定日">
           <input type="date" style={styles.input} value={editingRecord.nextDate || ""} onChange={e => setEditingRecord(r => ({ ...r, nextDate: e.target.value }))} />
@@ -3660,6 +3681,7 @@ function TimelineView({ pets, records }: { pets: Pet[]; records: HealthRecord[] 
                       {r.category}
                       {r.weight && ` · ⚖️ ${r.weight}kg`}
                       {r.cost && ` · 💰 ¥${Number(r.cost).toLocaleString()}`}
+                      {r.calories && ` · 🔥 ${r.calories}kcal`}
                     </div>
                     {r.description && (
                       <div style={{ fontSize: 12, color: "#7A5C3A", marginTop: 3, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
@@ -4065,6 +4087,7 @@ function FoodDraftModal({
     { key: "target", label: "対象", placeholder: "例：成猫用、猫用・総合栄養食" },
     { key: "flavor", label: "味・種類", placeholder: "例：チキン味、まぐろ味" },
     { key: "note", label: "特徴", placeholder: "例：毛玉ケアに配慮" },
+    { key: "calories", label: "カロリー（kcal）", placeholder: "例：30" },
   ];
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 400, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}
@@ -4132,9 +4155,10 @@ function RecordRow({ record, onDelete, onEdit, expanded }: { record: HealthRecor
           <button style={styles.deleteBtn} onClick={e => { e.stopPropagation(); onDelete(record.id); }}>🗑️</button>
         </div>
       </div>
-      {open && (record.description || record.weight || record.foodPhoto) && (
+      {open && (record.description || record.weight || record.foodPhoto || record.calories) && (
         <div style={styles.recordBody}>
           {record.weight && <div style={{ marginBottom: 4 }}>⚖️ {record.weight} kg</div>}
+          {record.calories && <div style={{ marginBottom: 4 }}>🔥 {record.calories} kcal</div>}
           {record.foodPhoto && (
             <img src={record.foodPhoto} alt="パッケージ" onClick={e => { e.stopPropagation(); setShowFoodPhoto(true); }}
               style={{ width: "100%", maxHeight: 200, objectFit: "cover", borderRadius: 10, marginBottom: 8, cursor: "pointer" }} />
