@@ -6,8 +6,9 @@ import { onAuthStateChanged, signInWithPopup, signOut, User } from "firebase/aut
 // ============================================================
 // バージョン情報
 // ============================================================
-const APP_VERSION = "1.9.9";
+const APP_VERSION = "1.9.10";
 const VERSION_HISTORY = [
+  { version: "1.9.10", date: "2026-11-19", notes: ["フードのAI解析で、読み取った内容を確認・修正してから入力できるようにした", "フードのAI解析を高解像度の写真で行うようにして、内容量などの小さい文字も読み取りやすくした"] },
   { version: "1.9.9", date: "2026-11-19", notes: ["フードのパッケージ写真をAI解析して、商品名やメーカー・内容量などをタイトルとメモに自動入力できるようにした"] },
   { version: "1.9.8", date: "2026-11-18", notes: ["AI解析からの薬の二重登録を防止（同じ名前・開始日の薬がある場合はスキップして知らせる）"] },
   { version: "1.9.7", date: "2026-11-17", notes: ["AI解析から薬を登録するとき、『薬』カテゴリの記録にも効能つきで自動登録するようにした"] },
@@ -403,8 +404,8 @@ async function analyzeFoodWithGemini(imageDataUrl: string): Promise<string> {
 ===END===
 - name はパッケージに書かれた商品名をそのまま書く
 - maker はメーカー名・ブランド名（例：ロイヤルカナン、ピュリナ ワン）
-- amount は内容量（例：1.5kg、400g、24缶）。書かれていなければ空文字にする
-- target は対象（例：成猫用、子猫用、シニア用、全ステージ）。書かれていなければ空文字にする
+- amount は内容量（例：1.5kg、400g、24缶）。内容量はパッケージの隅などに小さい文字で書かれていることが多いので、g・kg・ml・個などの表記をよく探すこと。読み取れない場合は推測で埋めず空文字にすること
+- target は対象（例：成猫用、子猫用、シニア用、全ステージ）。「総合栄養食」「一般食」「療法食」「おやつ」などの分類が書かれていればそれも含めること。対象動物（猫用・犬用）がパッケージから明らかな場合も含めること（例：猫用・成猫用）。それでも分からなければ空文字にすること
 - flavor は味や種類（例：チキン味、まぐろ味、室内猫用）。書かれていなければ空文字にする
 - note は主な特徴を1文で短く（例：毛玉ケアに配慮、尿路の健康維持）。書かれていなければ空文字にする
 - 書かれていないことを推測で補わない
@@ -633,6 +634,8 @@ export default function App() {
   const [geminiKeyInput, setGeminiKeyInput] = useState(getGeminiApiKey());
   const [aiAnalyzing, setAiAnalyzing] = useState(false); // ★ AI解析中
   const [foodAnalyzing, setFoodAnalyzing] = useState(false); // ★ v1.9.9: フードAI解析中
+  const [foodDraft, setFoodDraft] = useState<ParsedFood | null>(null); // ★ v1.9.10: フードAI解析の確認用下書き
+  const [foodPhotoHiRes, setFoodPhotoHiRes] = useState<string>(""); // ★ v1.9.10: フードAI解析専用の高解像度コピー（一時保持のみ・保存しない）
   const [aiResult, setAiResult] = useState<string | null>(null); // ★ AI解析結果（確認モーダル用）
   const [aiError, setAiError] = useState<string | null>(null);
   const [aiDrafts, setAiDrafts] = useState<MedicineDraft[] | null>(null); // ★ AI解析から抽出した処方薬の下書き
@@ -647,6 +650,9 @@ export default function App() {
 
   // ★ ブラウザ戻るボタン対応 ＋ リロード時に現在のページを復元
   const navigateTo = (nextView: View, petId?: number) => {
+    // ★ v1.9.10: フード解析用の一時データ（高解像度コピー・確認用下書き）は画面遷移時に破棄する
+    setFoodPhotoHiRes("");
+    setFoodDraft(null);
     const finalPetId = petId ?? selectedPetId;
     const hash = finalPetId !== null && finalPetId !== undefined
       ? `#${nextView}-${finalPetId}`
@@ -1110,9 +1116,10 @@ export default function App() {
     navigateTo("recordList");
   }
 
-  // ★ v1.9.9: フードのパッケージ写真をAI解析してタイトル・メモへ反映
+  // ★ v1.9.9: フードのパッケージ写真をAI解析
+  // ★ v1.9.10: 解析には高解像度コピー（あれば）を優先し、結果は即反映せず確認パネルで見せる
   async function handleAnalyzeFood() {
-    const photo = editingRecord.foodPhoto;
+    const photo = foodPhotoHiRes || editingRecord.foodPhoto;
     if (!photo || foodAnalyzing) return;
     if (!getGeminiApiKey()) { setShowApiKeySettings(true); return; }
     setFoodAnalyzing(true);
@@ -1123,18 +1130,39 @@ export default function App() {
         showToast("読み取れませんでした。はっきり写った写真でお試しください");
         return;
       }
-      const lines: string[] = [];
-      const hasTitle = !!(editingRecord.title && editingRecord.title.trim());
-      let newTitle: string | null = null;
-      if (food.name) {
-        if (!hasTitle) newTitle = food.name;
-        else lines.push(`商品名：${food.name}`);
-      }
-      if (food.maker) lines.push(`メーカー：${food.maker}`);
-      if (food.amount) lines.push(`内容量：${food.amount}`);
-      if (food.target) lines.push(`対象：${food.target}`);
-      if (food.flavor) lines.push(`種類：${food.flavor}`);
-      if (food.note) lines.push(`特徴：${food.note}`);
+      setFoodDraft(food);
+    } catch (err: any) {
+      if (err?.message === "NO_KEY") { setShowApiKeySettings(true); return; }
+      showToast("読み取れませんでした。はっきり写った写真でお試しください");
+    } finally {
+      setFoodAnalyzing(false);
+    }
+  }
+
+  // ★ v1.9.10: 確認パネルで修正されたフード情報をタイトル・メモへ反映（反映ロジックは v1.9.9 と同じ）
+  function applyFoodDraft() {
+    if (!foodDraft) return;
+    const food: ParsedFood = {
+      name: foodDraft.name.trim(),
+      maker: foodDraft.maker.trim(),
+      amount: foodDraft.amount.trim(),
+      target: foodDraft.target.trim(),
+      flavor: foodDraft.flavor.trim(),
+      note: foodDraft.note.trim(),
+    };
+    const lines: string[] = [];
+    const hasTitle = !!(editingRecord.title && editingRecord.title.trim());
+    let newTitle: string | null = null;
+    if (food.name) {
+      if (!hasTitle) newTitle = food.name;
+      else lines.push(`商品名：${food.name}`);
+    }
+    if (food.maker) lines.push(`メーカー：${food.maker}`);
+    if (food.amount) lines.push(`内容量：${food.amount}`);
+    if (food.target) lines.push(`対象：${food.target}`);
+    if (food.flavor) lines.push(`種類：${food.flavor}`);
+    if (food.note) lines.push(`特徴：${food.note}`);
+    if (newTitle !== null || lines.length > 0) {
       setEditingRecord(r => ({
         ...r,
         ...(newTitle !== null ? { title: newTitle } : {}),
@@ -1142,13 +1170,9 @@ export default function App() {
           ? (r.description ? r.description + "\n\n" : "") + lines.join("\n")
           : r.description,
       }));
-      showToast("AIで読み取りました 🔍");
-    } catch (err: any) {
-      if (err?.message === "NO_KEY") { setShowApiKeySettings(true); return; }
-      showToast("読み取れませんでした。はっきり写った写真でお試しください");
-    } finally {
-      setFoodAnalyzing(false);
+      showToast("AIで読み取った内容を入力しました 🔍");
     }
+    setFoodDraft(null);
   }
 
   // ---------- Medicine CRUD ----------
@@ -2175,7 +2199,7 @@ export default function App() {
               {editingRecord.foodPhoto && (
                 <div style={{ position: "relative" }}>
                   <img src={editingRecord.foodPhoto} alt="" style={{ width: 80, height: 80, objectFit: "cover", borderRadius: 10, border: "2px solid #E8D5BC" }} />
-                  <button onClick={() => setEditingRecord(r => ({ ...r, foodPhoto: "" }))}
+                  <button onClick={() => { setEditingRecord(r => ({ ...r, foodPhoto: "" })); setFoodPhotoHiRes(""); }}
                     style={{ position: "absolute", top: -6, right: -6, background: "#EF4444", border: "none", borderRadius: "50%", width: 20, height: 20, color: "#FFF", fontSize: 12, cursor: "pointer", lineHeight: "20px", padding: 0 }}>✕</button>
                 </div>
               )}
@@ -2192,6 +2216,12 @@ export default function App() {
                       canvas.width = img.width * scale; canvas.height = img.height * scale;
                       canvas.getContext("2d")!.drawImage(img, 0, 0, canvas.width, canvas.height);
                       setEditingRecord(r => ({ ...r, foodPhoto: canvas.toDataURL("image/jpeg", 0.75) }));
+                      // ★ v1.9.10: AI解析専用の高解像度コピー（一時保持のみ・保存しない）
+                      const hiCanvas = document.createElement("canvas");
+                      const hiScale = Math.min(1, 1400 / img.width);
+                      hiCanvas.width = img.width * hiScale; hiCanvas.height = img.height * hiScale;
+                      hiCanvas.getContext("2d")!.drawImage(img, 0, 0, hiCanvas.width, hiCanvas.height);
+                      setFoodPhotoHiRes(hiCanvas.toDataURL("image/jpeg", 0.85));
                     };
                     img.src = ev.target?.result as string;
                   };
@@ -2205,7 +2235,7 @@ export default function App() {
                   style={{ marginTop: 10, width: "100%", background: "#F0F8FF", border: "1px dashed #93C5FD", borderRadius: 10, padding: "12px", textAlign: "center", cursor: foodAnalyzing ? "default" : "pointer", color: "#1E40AF", fontSize: 13, fontWeight: 600, opacity: foodAnalyzing ? 0.6 : 1 }}>
                   {foodAnalyzing ? "🔄 AIが解析中..." : "🔍 AIで商品名を読み取る"}
                 </button>
-                <div style={{ fontSize: 11, color: "#9A7A5C", marginTop: 4 }}>※ 商品名・メーカー・内容量などを読み取り、タイトルとメモに自動入力します（要Gemini APIキー）</div>
+                <div style={{ fontSize: 11, color: "#9A7A5C", marginTop: 4 }}>※ 商品名・メーカー・内容量などを読み取り、確認してからタイトルとメモに入力します（要Gemini APIキー）</div>
               </>
             )}
           </Field>
@@ -2227,6 +2257,12 @@ export default function App() {
         onRemoveDraft={removeAiDraft}
         onRegisterDrafts={registerAiDrafts}
         onDismissDrafts={() => setAiDrafts(null)}
+      />
+      <FoodDraftModal
+        draft={foodDraft}
+        onUpdate={patch => setFoodDraft(d => (d ? { ...d, ...patch } : d))}
+        onApply={applyFoodDraft}
+        onCancel={() => setFoodDraft(null)}
       />
       <Toast message={toast} />
     </Layout>
@@ -2312,7 +2348,7 @@ export default function App() {
               {editingRecord.foodPhoto && (
                 <div style={{ position: "relative" }}>
                   <img src={editingRecord.foodPhoto} alt="" style={{ width: 80, height: 80, objectFit: "cover", borderRadius: 10, border: "2px solid #E8D5BC" }} />
-                  <button onClick={() => setEditingRecord(r => ({ ...r, foodPhoto: "" }))}
+                  <button onClick={() => { setEditingRecord(r => ({ ...r, foodPhoto: "" })); setFoodPhotoHiRes(""); }}
                     style={{ position: "absolute", top: -6, right: -6, background: "#EF4444", border: "none", borderRadius: "50%", width: 20, height: 20, color: "#FFF", fontSize: 12, cursor: "pointer", lineHeight: "20px", padding: 0 }}>✕</button>
                 </div>
               )}
@@ -2329,6 +2365,12 @@ export default function App() {
                       canvas.width = img.width * scale; canvas.height = img.height * scale;
                       canvas.getContext("2d")!.drawImage(img, 0, 0, canvas.width, canvas.height);
                       setEditingRecord(r => ({ ...r, foodPhoto: canvas.toDataURL("image/jpeg", 0.75) }));
+                      // ★ v1.9.10: AI解析専用の高解像度コピー（一時保持のみ・保存しない）
+                      const hiCanvas = document.createElement("canvas");
+                      const hiScale = Math.min(1, 1400 / img.width);
+                      hiCanvas.width = img.width * hiScale; hiCanvas.height = img.height * hiScale;
+                      hiCanvas.getContext("2d")!.drawImage(img, 0, 0, hiCanvas.width, hiCanvas.height);
+                      setFoodPhotoHiRes(hiCanvas.toDataURL("image/jpeg", 0.85));
                     };
                     img.src = ev.target?.result as string;
                   };
@@ -2342,7 +2384,7 @@ export default function App() {
                   style={{ marginTop: 10, width: "100%", background: "#F0F8FF", border: "1px dashed #93C5FD", borderRadius: 10, padding: "12px", textAlign: "center", cursor: foodAnalyzing ? "default" : "pointer", color: "#1E40AF", fontSize: 13, fontWeight: 600, opacity: foodAnalyzing ? 0.6 : 1 }}>
                   {foodAnalyzing ? "🔄 AIが解析中..." : "🔍 AIで商品名を読み取る"}
                 </button>
-                <div style={{ fontSize: 11, color: "#9A7A5C", marginTop: 4 }}>※ 商品名・メーカー・内容量などを読み取り、タイトルとメモに自動入力します（要Gemini APIキー）</div>
+                <div style={{ fontSize: 11, color: "#9A7A5C", marginTop: 4 }}>※ 商品名・メーカー・内容量などを読み取り、確認してからタイトルとメモに入力します（要Gemini APIキー）</div>
               </>
             )}
           </Field>
@@ -2364,6 +2406,12 @@ export default function App() {
         onRemoveDraft={removeAiDraft}
         onRegisterDrafts={registerAiDrafts}
         onDismissDrafts={() => setAiDrafts(null)}
+      />
+      <FoodDraftModal
+        draft={foodDraft}
+        onUpdate={patch => setFoodDraft(d => (d ? { ...d, ...patch } : d))}
+        onApply={applyFoodDraft}
+        onCancel={() => setFoodDraft(null)}
       />
       <Toast message={toast} />
     </Layout>
@@ -3990,6 +4038,61 @@ function AiResultModal({
             </button>
           </>
         )}
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// ★ v1.9.10: フードAI解析の確認パネル
+// 読み取った内容をその場で確認・修正してからタイトル・メモへ反映する
+// ============================================================
+function FoodDraftModal({
+  draft, onUpdate, onApply, onCancel,
+}: {
+  draft: ParsedFood | null;
+  onUpdate: (patch: Partial<ParsedFood>) => void;
+  onApply: () => void;
+  onCancel: () => void;
+}) {
+  if (!draft) return null;
+  const input: React.CSSProperties = { width: "100%", padding: "8px 10px", borderRadius: 8, border: "1.5px solid #E8D5BC", background: "#FFFBF7", fontSize: 14, color: "#3D2B1A", boxSizing: "border-box" };
+  const label: React.CSSProperties = { display: "block", fontSize: 11, fontWeight: 600, color: "#7A5C3A", marginBottom: 4 };
+  const fields: { key: keyof ParsedFood; label: string; placeholder: string }[] = [
+    { key: "name", label: "商品名", placeholder: "例：ピュリナ ワン キャット" },
+    { key: "maker", label: "メーカー・ブランド", placeholder: "例：ピュリナ ワン" },
+    { key: "amount", label: "内容量", placeholder: "例：2kg、400g" },
+    { key: "target", label: "対象", placeholder: "例：成猫用、猫用・総合栄養食" },
+    { key: "flavor", label: "味・種類", placeholder: "例：チキン味、まぐろ味" },
+    { key: "note", label: "特徴", placeholder: "例：毛玉ケアに配慮" },
+  ];
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 400, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}
+      onClick={onCancel}>
+      <div style={{ background: "#FFF", borderRadius: 20, padding: 24, width: "100%", maxWidth: 480, maxHeight: "80vh", overflowY: "auto" }}
+        onClick={e => e.stopPropagation()}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+          <div style={{ fontWeight: 700, fontSize: 16, color: "#3D2B1A" }}>🔍 読み取り結果の確認</div>
+          <button onClick={onCancel} style={{ background: "none", border: "none", fontSize: 20, cursor: "pointer", color: "#9A7A5C" }}>✕</button>
+        </div>
+        <div style={{ fontSize: 12, color: "#7A5C3A", marginBottom: 14, lineHeight: 1.6 }}>
+          パッケージから読み取った内容です。違っているところは直してから「この内容で入力する」を押してください。
+        </div>
+        {fields.map(f => (
+          <div key={f.key} style={{ marginBottom: 10 }}>
+            <label style={label}>{f.label}</label>
+            <input style={input} value={draft[f.key]} placeholder={f.placeholder}
+              onChange={e => onUpdate({ [f.key]: e.target.value } as Partial<ParsedFood>)} />
+          </div>
+        ))}
+        <button onClick={onApply}
+          style={{ width: "100%", background: "#C49A6C", color: "#FFF", border: "none", borderRadius: 12, padding: "13px", fontSize: 14, fontWeight: 700, cursor: "pointer", marginTop: 6 }}>
+          この内容で入力する
+        </button>
+        <button onClick={onCancel}
+          style={{ width: "100%", background: "none", color: "#7A5C3A", border: "none", padding: "8px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>
+          やめる
+        </button>
       </div>
     </div>
   );
