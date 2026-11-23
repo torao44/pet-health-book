@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { db, auth, googleProvider } from "./firebase";
 import { ref, onValue, set, update } from "firebase/database";
 import { onAuthStateChanged, signInWithPopup, signOut, User } from "firebase/auth";
@@ -7,8 +7,9 @@ import { isFcmConfigured, enableFcmNotifications, startFcmForegroundListener } f
 // ============================================================
 // バージョン情報
 // ============================================================
-const APP_VERSION = "1.9.12";
+const APP_VERSION = "1.9.13";
 const VERSION_HISTORY = [
+  { version: "1.9.13", date: "2026-11-23", notes: ["お薬リマインドの通知時刻をアプリで設定できるようにした（グループ全員に同じ時刻で届く）"] },
   { version: "1.9.12", date: "2026-11-23", notes: ["お薬リマインドのプッシュ通知に対応（有効化の準備）"] },
   { version: "1.9.11", date: "2026-11-19", notes: ["フードの記録にカロリー（kcal）を入力できる欄を追加", "フードのAI解析でカロリーも読み取れるようにし、確認パネルからも入力できるようにした"] },
   { version: "1.9.10", date: "2026-11-19", notes: ["フードのAI解析で、読み取った内容を確認・修正してから入力できるようにした", "フードのAI解析を高解像度の写真で行うようにして、内容量などの小さい文字も読み取りやすくした"] },
@@ -138,6 +139,7 @@ interface AppState {
   trash: HealthRecord[];
   memorials: Memorial[];
   medicines: Medicine[];
+  reminderTime?: string; // ★ v1.9.13: お薬リマインドの通知時刻（"HH:MM"、グループ共有、既定 "21:10"）
   nextPetId: number;
   nextRecordId: number;
   nextPhotoId: number;
@@ -177,6 +179,7 @@ const DEFAULT_STATE: AppState = {
   trash: [],
   memorials: [],
   medicines: [],
+  reminderTime: "21:10",
   nextPetId: 1,
   nextRecordId: 1,
   nextPhotoId: 1,
@@ -624,6 +627,9 @@ export default function App() {
   const [toast, setToast] = useState<string>("");
   const [fcmOn, setFcmOn] = useState(false); // ★ v1.9.12: プッシュ通知が有効かどうか
   const [fcmBusy, setFcmBusy] = useState(false);
+  const [reminderTimeDraft, setReminderTimeDraft] = useState("21:10"); // ★ v1.9.13: 通知時刻の入力下書き
+  const reminderTimeEditingRef = useRef(false); // ★ v1.9.13: 通知時刻を編集中かどうか
+  const reminderTimeSavedRef = useRef(false); // ★ v1.9.13: 編集中に保存が走ったかどうか
   const [calendarRecords, setCalendarRecords] = useState<HealthRecord[]>([]);
   const [showCalendarModal, setShowCalendarModal] = useState(false);
   const [inviteInput, setInviteInput] = useState("");
@@ -751,6 +757,7 @@ export default function App() {
             ? (Array.isArray(val.medicines) ? val.medicines : Object.values(val.medicines))
                 .map((m: any) => ({ ...m, checks: m.checks || {} }))
             : [],
+          reminderTime: typeof val.reminderTime === "string" && /^\d{2}:\d{2}$/.test(val.reminderTime) ? val.reminderTime : "21:10",
           nextPhotoId: val.nextPhotoId || 1,
           nextMemorialId: val.nextMemorialId || 1,
           nextMedicineId: val.nextMedicineId || 1,
@@ -785,6 +792,13 @@ export default function App() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user, groupId]);
+
+  // ★ v1.9.13: 通知時刻の下書きを、編集中でなければ保存値（グループ共有）に同期する
+  useEffect(() => {
+    if (!reminderTimeEditingRef.current) {
+      setReminderTimeDraft(state?.reminderTime || "21:10");
+    }
+  }, [state?.reminderTime]);
 
   async function createGroup() {
     if (!user || user === "loading") return;
@@ -829,6 +843,7 @@ export default function App() {
       trash: newState.trash,
       memorials: newState.memorials || [],
       medicines: newState.medicines || [],
+      reminderTime: newState.reminderTime || "21:10",
       nextPetId: newState.nextPetId,
       nextRecordId: newState.nextRecordId,
       nextPhotoId: newState.nextPhotoId,
@@ -868,6 +883,30 @@ export default function App() {
       showToast("お薬リマインド通知を有効にしました 🔔");
     } else {
       showToast("通知を有効にできませんでした");
+    }
+  }
+
+  // ★ v1.9.13: 通知時刻（グループ共有）を変更したら即 RTDB へ保存する
+  async function handleReminderTimeChange(value: string) {
+    setReminderTimeDraft(value);
+    if (!groupId || groupId === "loading") return;
+    if (!/^\d{2}:\d{2}$/.test(value)) return; // 入力が完成した値のときだけ保存
+    if (value === (state?.reminderTime || "21:10")) return;
+    try {
+      await set(ref(db, `pet-health-book/groups/${groupId}/data/reminderTime`), value);
+      reminderTimeSavedRef.current = true;
+    } catch (e) {
+      console.error("reminderTime save failed:", e);
+      showToast("通知時刻の保存に失敗しました");
+    }
+  }
+
+  // ★ v1.9.13: 通知時刻の編集を終えたら、保存したことをトーストで知らせる
+  function handleReminderTimeBlur() {
+    reminderTimeEditingRef.current = false;
+    if (reminderTimeSavedRef.current) {
+      reminderTimeSavedRef.current = false;
+      showToast(`通知時刻を ${reminderTimeDraft} に設定しました 🕘`);
     }
   }
 
@@ -1797,6 +1836,19 @@ export default function App() {
                 {fcmBusy ? "設定中…" : "🔔 通知を有効にする"}
               </button>
             )}
+            {/* ★ v1.9.13: 通知時刻（グループ共有設定） */}
+            <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              <span style={{ fontSize: 13, color: "#7A5C3A", fontWeight: 600 }}>🕘 通知時刻</span>
+              <input
+                type="time"
+                value={reminderTimeDraft}
+                onFocus={() => { reminderTimeEditingRef.current = true; }}
+                onChange={(e) => handleReminderTimeChange(e.target.value)}
+                onBlur={handleReminderTimeBlur}
+                style={{ padding: "6px 10px", borderRadius: 8, border: "1.5px solid #E8D5BC", background: "#FFFBF7", fontSize: 14, color: "#3D2B1A" }}
+              />
+              <span style={{ fontSize: 11, color: "#9A7A5C" }}>グループ全員に同じ時刻で届きます</span>
+            </div>
           </div>
         )}
         {petMedicines.length === 0 ? (
