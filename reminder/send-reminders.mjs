@@ -28,6 +28,12 @@
 // アプリのデータモデルに朝・夕などの回ごとの区別は無い
 // （timing は自由記入、checks は日単位）ため、通知時刻の回では
 // その日まだチェックされていない当日分をすべて対象にする。
+//
+// v1.9.14〜: トークン登録は2形式が混在する:
+//   旧形式: キー自体がトークン、値は { uid, updatedAt, ua }
+//   新形式: キーは端末ID、値の token フィールドがトークン
+// 両形式からトークンを取り出し、同一トークンは1回だけ送る。
+// 失効トークンの掃除はレコードのキーで行う（新形式ではキー≠トークン）。
 // ============================================================
 import admin from "firebase-admin";
 
@@ -155,8 +161,25 @@ async function main() {
     if (due.length === 0) continue;
 
     const tokenMap = (group && group.fcmTokens) || {};
-    const tokens = Object.keys(tokenMap);
-    if (tokens.length === 0) continue;
+    // 旧形式（キー=トークン）と新形式（キー=端末ID、値に token）の両対応。
+    // 同一トークンが複数レコードにある場合は最初のキーを掃除用に保持し、
+    // 送信は1回だけにする。
+    const tokenEntries = [];
+    const seenTokens = new Set();
+    for (const [key, value] of Object.entries(tokenMap)) {
+      const token =
+        value &&
+        typeof value === "object" &&
+        typeof value.token === "string" &&
+        value.token
+          ? value.token
+          : key;
+      if (seenTokens.has(token)) continue;
+      seenTokens.add(token);
+      tokenEntries.push({ key, token });
+    }
+    if (tokenEntries.length === 0) continue;
+    const tokens = tokenEntries.map((e) => e.token);
 
     const items = due.map(
       (med) => `${petNames.get(med.petId) ?? "ペット"}：${med.name}`
@@ -181,7 +204,7 @@ async function main() {
           code === "messaging/invalid-registration-token")
       ) {
         removals.push(
-          db.ref(`pet-health-book/groups/${groupId}/fcmTokens/${tokens[i]}`).remove()
+          db.ref(`pet-health-book/groups/${groupId}/fcmTokens/${tokenEntries[i].key}`).remove()
         );
       }
     });
