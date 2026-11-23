@@ -1,0 +1,41 @@
+# ペット健康手帳 お薬リマインダー（毎晩 21:10 JST）
+#
+# このファイルをリポジトリの.github/workflows/medicine-reminder.yml
+# に置いてください（Muse の GitHub 連携にはワークフロー権限がないため、
+# このファイルだけは手動追加が必要です）。
+#
+# リポジトリの Settings → Secrets and variables → Actions に
+# シークレット FIREBASE_SERVICE_ACCOUNT_JSON を登録してください。
+# 値は Firebase コンソール → プロジェクトの設定 → サービス アカウント で
+# 発行した秘密鍵 JSON の中身そのままです。
+#
+# 動作: reminder/send-reminders.mjs が Realtime Database のお薬データを読み、
+# その日が投薬日で未チェックの薬があるグループの登録端末へ FCM 通知を送ります。
+
+name: medicine-reminder
+
+on:
+schedule:
+# 21:10 JST = 12:10 UTC
+- cron: "10 12 * * *"
+workflow_dispatch:
+
+jobs:
+send:
+runs-on: ubuntu-latest
+steps:
+- uses: actions/checkout@v4
+
+- uses: actions/setup-node@v4
+with:
+node-version: "20"
+
+- name: Install dependencies
+working-directory: reminder
+run: npm ci
+
+- name: Send medicine reminders
+working-directory: reminder
+env:
+FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON}}
+run: node send-reminders.mjs
