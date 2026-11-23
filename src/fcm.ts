@@ -8,7 +8,7 @@
 // Firebase コンソール → プロジェクトの設定 → Cloud Messaging →
 // 「Web Push 証明書」で生成したキーペアの公開鍵をここに貼ること。
 // プレースホルダの間は通知UI自体を表示しない（機能オフ）。
-export const FCM_VAPID_KEY: string = "__FCM_VAPID_KEY__";
+export const FCM_VAPID_KEY: string = "BGJIi9zC3zKjetqDVhkjHV5_L5BoFMnWSkVwh55FqxDA0EWEygHn43c2xn5ZukaMdvFhZX0y04WMsbop68fd8h8";
 
 import { getMessaging, getToken, onMessage, type Messaging } from "firebase/messaging";
 import { ref, set } from "firebase/database";
