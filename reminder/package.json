@@ -1,0 +1,1 @@
+{"dependencies":{"firebase-admin":"^13.0.0"},"description":"ペット健康手帳 お薬リマインダー送信スクリプト（GitHub Actions から毎晩 21:10 JST に実行）","engines":{"node":">=18"},"name":"pet-health-book-reminder","private":true,"scripts":{"send":"node send-reminders.mjs"},"type":"module","version":"1.0.0"}

@@ -2,12 +2,14 @@ import { useState, useEffect } from "react";
 import { db, auth, googleProvider } from "./firebase";
 import { ref, onValue, set, update } from "firebase/database";
 import { onAuthStateChanged, signInWithPopup, signOut, User } from "firebase/auth";
+import { isFcmConfigured, enableFcmNotifications, startFcmForegroundListener } from "./fcm";
 
 // ============================================================
 // バージョン情報
 // ============================================================
-const APP_VERSION = "1.9.11";
+const APP_VERSION = "1.9.12";
 const VERSION_HISTORY = [
+  { version: "1.9.12", date: "2026-11-23", notes: ["お薬リマインドのプッシュ通知に対応（有効化の準備）"] },
   { version: "1.9.11", date: "2026-11-19", notes: ["フードの記録にカロリー（kcal）を入力できる欄を追加", "フードのAI解析でカロリーも読み取れるようにし、確認パネルからも入力できるようにした"] },
   { version: "1.9.10", date: "2026-11-19", notes: ["フードのAI解析で、読み取った内容を確認・修正してから入力できるようにした", "フードのAI解析を高解像度の写真で行うようにして、内容量などの小さい文字も読み取りやすくした"] },
   { version: "1.9.9", date: "2026-11-19", notes: ["フードのパッケージ写真をAI解析して、商品名やメーカー・内容量などをタイトルとメモに自動入力できるようにした"] },
@@ -620,6 +622,8 @@ export default function App() {
   const [editingRecord, setEditingRecord] = useState<Partial<HealthRecord>>({});
   const [filterCategory, setFilterCategory] = useState<string>("すべて");
   const [toast, setToast] = useState<string>("");
+  const [fcmOn, setFcmOn] = useState(false); // ★ v1.9.12: プッシュ通知が有効かどうか
+  const [fcmBusy, setFcmBusy] = useState(false);
   const [calendarRecords, setCalendarRecords] = useState<HealthRecord[]>([]);
   const [showCalendarModal, setShowCalendarModal] = useState(false);
   const [inviteInput, setInviteInput] = useState("");
@@ -764,6 +768,24 @@ export default function App() {
     return () => unsubscribe();
   }, [groupId]);
 
+  // ★ v1.9.12: プッシュ通知（フォアグラウンド受信＋許可済みならトークン最新化）
+  useEffect(() => {
+    if (!isFcmConfigured()) return;
+    if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+      setFcmOn(true);
+    }
+    if (!user || user === "loading" || !groupId || groupId === "loading") return;
+    startFcmForegroundListener((title, body) => {
+      showToast(body ? `${title} ${body}` : title);
+    });
+    if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+      enableFcmNotifications(user.uid, groupId).then(ok => {
+        if (ok) setFcmOn(true);
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user, groupId]);
+
   async function createGroup() {
     if (!user || user === "loading") return;
     const newGroupId = Math.random().toString(36).slice(2, 10).toUpperCase();
@@ -834,6 +856,20 @@ export default function App() {
     setToast(msg);
     setTimeout(() => setToast(""), 2500);
   };
+
+  // ★ v1.9.12: プッシュ通知を有効にする
+  async function handleEnableFcm() {
+    if (!user || user === "loading" || !groupId || groupId === "loading") return;
+    setFcmBusy(true);
+    const ok = await enableFcmNotifications(user.uid, groupId);
+    setFcmBusy(false);
+    if (ok) {
+      setFcmOn(true);
+      showToast("お薬リマインド通知を有効にしました 🔔");
+    } else {
+      showToast("通知を有効にできませんでした");
+    }
+  }
 
   // ★ ペット並び替え関数
   function movePet(petId: number, direction: "up" | "down") {
@@ -1751,6 +1787,18 @@ export default function App() {
           <span>💊 お薬</span>
           <button style={styles.linkBtn} onClick={() => { setEditingMedicine({ pattern: "daily", perDay: 1, startDate: medToday }); setShowMedicineForm(true); }}>＋ 薬を追加</button>
         </div>
+        {/* ★ v1.9.12: プッシュ通知（VAPIDキーが設定されている場合のみ表示） */}
+        {isFcmConfigured() && (
+          <div style={{ marginBottom: 12 }}>
+            {fcmOn ? (
+              <div style={{ fontSize: 13, color: "#059669", fontWeight: 600 }}>🔔 お薬リマインド通知：ON</div>
+            ) : (
+              <button style={styles.linkBtn} onClick={handleEnableFcm} disabled={fcmBusy}>
+                {fcmBusy ? "設定中…" : "🔔 通知を有効にする"}
+              </button>
+            )}
+          </div>
+        )}
         {petMedicines.length === 0 ? (
           <div style={{ background: "#FFF", borderRadius: 12, padding: "14px 16px", color: "#BBA08A", fontSize: 13, marginBottom: 20 }}>
             登録されているお薬はありません
