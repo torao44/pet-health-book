@@ -1,41 +1,57 @@
-# ペット健康手帳 お薬リマインダー（毎晩 21:10 JST）
+# ペット健康手帳 お薬リマインダー（15分ごとにチェック）
 #
-# このファイルをリポジトリの.github/workflows/medicine-reminder.yml
-# に置いてください（Muse の GitHub 連携にはワークフロー権限がないため、
-# このファイルだけは手動追加が必要です）。
+# ★ 差し替えのお願い ★
+# 既存の .github/workflows/medicine-reminder.yml の内容を、このファイルの
+# 内容でまるごと差し替えてください（Muse の GitHub 連携にはワークフロー
+# 権限がないため、このファイルだけは手動での差し替えが必要です）。
+# 以前の版（毎晩21:10に1回だけ実行）は、この版に置き換わります。
 #
-# リポジトリの Settings → Secrets and variables → Actions に
-# シークレット FIREBASE_SERVICE_ACCOUNT_JSON を登録してください。
-# 値は Firebase コンソール → プロジェクトの設定 → サービス アカウント で
-# 発行した秘密鍵 JSON の中身そのままです。
+# 前提: リポジトリの Settings → Secrets and variables → Actions に
+# シークレット FIREBASE_SERVICE_ACCOUNT_JSON が登録済みであること
+# （値は Firebase コンソール → プロジェクトの設定 → サービス アカウント で
+# 発行した秘密鍵 JSON の中身そのまま）。
 #
-# 動作: reminder/send-reminders.mjs が Realtime Database のお薬データを読み、
-# その日が投薬日で未チェックの薬があるグループの登録端末へ FCM 通知を送ります。
+# 動作: 15分ごとに reminder/send-reminders.mjs が起動し、Realtime Database の
+# お薬データと、グループの通知時刻（アプリの「🕘 通知時刻」で設定、既定は
+# 21:10）を読みます。設定時刻を過ぎていて、その日まだ送っていない
+# グループにだけ FCM 通知を送ります（遅れて実行されても届く
+# キャッチアップ方式で、送信済みの日は二重に送りません）。
+#
+# 注意: チェックは15分間隔のため、設定時刻から最大15分ほど遅れて
+# 届く場合があります。
 
 name: medicine-reminder
 
 on:
-schedule:
-# 21:10 JST = 12:10 UTC
-- cron: "10 12 * * *"
-workflow_dispatch:
+  schedule:
+    # 15分ごとにチェック（UTC/JST共通の間隔）
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
 
 jobs:
-send:
-runs-on: ubuntu-latest
-steps:
-- uses: actions/checkout@v4
+  send:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
 
-- uses: actions/setup-node@v4
-with:
-node-version: "20"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
 
-- name: Install dependencies
-working-directory: reminder
-run: npm ci
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: reminder/node_modules
+          key: ${{ runner.os }}-reminder-${{ hashFiles('reminder/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-reminder-
 
-- name: Send medicine reminders
-working-directory: reminder
-env:
-FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON}}
-run: node send-reminders.mjs
+      - name: Install dependencies
+        working-directory: reminder
+        run: npm ci
+
+      - name: Send medicine reminders
+        working-directory: reminder
+        env:
+          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+        run: node send-reminders.mjs
