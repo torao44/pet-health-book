@@ -7,8 +7,9 @@ import { isFcmConfigured, enableFcmNotifications, startFcmForegroundListener } f
 // ============================================================
 // バージョン情報
 // ============================================================
-const APP_VERSION = "1.9.14";
+const APP_VERSION = "1.9.15";
 const VERSION_HISTORY = [
+  { version: "1.9.15", date: "2026-11-24", notes: ["AI解析でお薬を登録したあとも明細書の内容がそのまま残るようにし、続けて詳細メモに追記できるようにした", "診療明細書のAI解析で、合計金額（ご請求額）を費用欄に自動で入力するようにした"] },
   { version: "1.9.14", date: "2026-11-23", notes: ["お薬リマインドの通知が同じ端末に2件届くことがある問題を修正（通知の登録を端末ごとに1件に整理）"] },
   { version: "1.9.13", date: "2026-11-23", notes: ["お薬リマインドの通知時刻をアプリで設定できるようにした（グループ全員に同じ時刻で届く）"] },
   { version: "1.9.12", date: "2026-11-23", notes: ["お薬リマインドのプッシュ通知に対応（有効化の準備）"] },
@@ -589,9 +590,12 @@ function medicineRemainingDays(med: Medicine, dateStr: string): number | null {
 // 本文末尾の ===MED_JSON=== 〜 ===END=== ブロックを抽出し、本文からは取り除く。
 // 取り出しに失敗した場合は下書きなし（従来通りの表示のみ）になる。
 // ============================================================
-function parseAiReceiptText(raw: string): { text: string; drafts: ParsedMedicine[] } {
+function parseAiReceiptText(raw: string): { text: string; drafts: ParsedMedicine[]; totalCost: string } {
+  // ★ v1.9.15: 合計金額（ご請求額、なければ小計（税込））を費用欄への自動入力用に取り出す（数字のみ）
+  const totalMatch = raw.match(/【ご請求額】[^\d]*([\d,]+)/) || raw.match(/【小計（税込）】[^\d]*([\d,]+)/);
+  const totalCost = totalMatch ? totalMatch[1].replace(/,/g, "") : "";
   const match = raw.match(/===MED_JSON===([\s\S]*?)===END===/);
-  if (!match || match.index === undefined) return { text: raw, drafts: [] };
+  if (!match || match.index === undefined) return { text: raw, drafts: [], totalCost };
   const text = (raw.slice(0, match.index) + raw.slice(match.index + match[0].length)).trim();
   try {
     const parsed = JSON.parse(match[1].trim());
@@ -606,9 +610,9 @@ function parseAiReceiptText(raw: string): { text: string; drafts: ParsedMedicine
         days: typeof x.days === "number" && x.days > 0 ? x.days : null,
         effect: typeof x.effect === "string" ? x.effect.trim() : "",
       }));
-    return { text, drafts };
+    return { text, drafts, totalCost };
   } catch {
-    return { text, drafts: [] };
+    return { text, drafts: [], totalCost };
   }
 }
 
@@ -1402,12 +1406,11 @@ export default function App() {
       }
       return { ...s, medicines: [...(s.medicines || []), ...newMeds], nextMedicineId: nextId, records: [...s.records, ...newRecords], nextRecordId: nextRecId };
     });
+    // ★ v1.9.15: 登録後もモーダルは閉じない（解析テキストを残し、続けて「詳細メモに追記」できるようにする）
     setAiDrafts(null);
-    setAiResult(null);
-    setAiError(null);
-    if (skippedCount === 0) showToast("お薬を登録しました 💊");
-    else if (toRegister.length === 0) showToast("すべて登録済みでした 💊");
-    else showToast(`登録しました（${toRegister.length}件）。${skippedCount}件は登録済みのためスキップしました`);
+    if (skippedCount === 0) showToast("お薬を登録しました 💊 続けて明細をメモに追記できます");
+    else if (toRegister.length === 0) showToast("すべて登録済みでした 💊 続けて明細をメモに追記できます");
+    else showToast(`登録しました（${toRegister.length}件）。${skippedCount}件は登録済みのためスキップしました。続けて明細をメモに追記できます`);
   }
 
   // ============================================================
@@ -2278,11 +2281,13 @@ export default function App() {
                     setAiAnalyzing(true); setAiError(null);
                     try {
                       const rawResult = await analyzeReceiptWithGemini(dataUrl);
-                      const { text, drafts } = parseAiReceiptText(rawResult);
+                      const { text, drafts, totalCost } = parseAiReceiptText(rawResult);
                       setAiResult(text);
                       setAiDrafts(drafts.length > 0
                         ? drafts.map(d => ({ ...d, pattern: "daily" as const, startDate: editingRecord.date || toDateStr(new Date()) }))
                         : null);
+                      // ★ v1.9.15: 明細書の合計金額（ご請求額）を費用欄へ自動入力（手入力済みの場合は上書きしない）
+                      if (totalCost) setEditingRecord(r => (r.cost ? r : { ...r, cost: totalCost }));
                     } catch (err: any) {
                       setAiError(err.message || "解析に失敗しました");
                     } finally {
@@ -2433,11 +2438,13 @@ export default function App() {
                     setAiAnalyzing(true); setAiError(null);
                     try {
                       const rawResult = await analyzeReceiptWithGemini(dataUrl);
-                      const { text, drafts } = parseAiReceiptText(rawResult);
+                      const { text, drafts, totalCost } = parseAiReceiptText(rawResult);
                       setAiResult(text);
                       setAiDrafts(drafts.length > 0
                         ? drafts.map(d => ({ ...d, pattern: "daily" as const, startDate: editingRecord.date || toDateStr(new Date()) }))
                         : null);
+                      // ★ v1.9.15: 明細書の合計金額（ご請求額）を費用欄へ自動入力（手入力済みの場合は上書きしない）
+                      if (totalCost) setEditingRecord(r => (r.cost ? r : { ...r, cost: totalCost }));
                     } catch (err: any) {
                       setAiError(err.message || "解析に失敗しました");
                     } finally {
